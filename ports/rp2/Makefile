@@ -11,7 +11,7 @@ ifdef BOARD_DIR
 BOARD ?= $(notdir $(BOARD_DIR:/=))
 else
 # If not given on the command line, then default to RPI_PICO.
-BOARD ?= RPI_PICO
+BOARD ?= SYNTH
 BOARD_DIR ?= boards/$(BOARD)
 endif
 
