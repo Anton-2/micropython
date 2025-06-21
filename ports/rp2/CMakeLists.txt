@@ -405,7 +405,7 @@ if (MICROPY_PY_NETWORK_CYW43)
         MICROPY_PY_SOCKET_DEFAULT_TIMEOUT_MS=30000 # default socket timeout
     )
     if (CMAKE_BUILD_TYPE MATCHES Debug)
-    target_compile_definitions(${MICROPY_TARGET} PRIVATE
+        target_compile_definitions(${MICROPY_TARGET} PRIVATE
         CYW43_USE_STATS=1
     )
     endif()
@@ -478,6 +478,38 @@ if (MICROPY_PY_NETWORK_WIZNET5K)
         ${MICROPY_DIR}/lib/wiznet5k/Internet/DHCP/dhcp.c
     )
 endif()
+
+
+
+set(SYNTH_DEXED_LIB_DIR "${MICROPY_DIR}/lib/synth/src")
+
+
+target_include_directories(${MICROPY_TARGET} PRIVATE
+    ${SYNTH_DEXED_LIB_DIR}
+)
+
+list(APPEND MICROPY_SOURCE_EXTMOD ${MICROPY_DIR}/extmod/modsynth.c)
+
+list(APPEND MICROPY_SOURCE_LIB
+    ${SYNTH_DEXED_LIB_DIR}/synth_dexed.cpp
+    ${SYNTH_DEXED_LIB_DIR}/sin.cpp
+    ${SYNTH_DEXED_LIB_DIR}/porta.cpp
+    ${SYNTH_DEXED_LIB_DIR}/PluginFx.cpp
+    ${SYNTH_DEXED_LIB_DIR}/pitchenv.cpp
+    ${SYNTH_DEXED_LIB_DIR}/lfo.cpp
+    ${SYNTH_DEXED_LIB_DIR}/freqlut.cpp
+    ${SYNTH_DEXED_LIB_DIR}/fm_op_kernel.cpp
+    ${SYNTH_DEXED_LIB_DIR}/fm_core.cpp
+    ${SYNTH_DEXED_LIB_DIR}/exp2.cpp
+    ${SYNTH_DEXED_LIB_DIR}/env.cpp
+    ${SYNTH_DEXED_LIB_DIR}/EngineOpl.cpp
+    ${SYNTH_DEXED_LIB_DIR}/EngineMsfa.cpp
+    ${SYNTH_DEXED_LIB_DIR}/EngineMkI.cpp
+    ${SYNTH_DEXED_LIB_DIR}/dx7note.cpp
+    ${SYNTH_DEXED_LIB_DIR}/dexed.cpp
+    ${SYNTH_DEXED_LIB_DIR}/dexed_wrapper.cpp
+    ${SYNTH_DEXED_LIB_DIR}/arm_math.c
+)
 
 # Add qstr sources for extmod and usermod, in case they are modified by components above.
 list(APPEND MICROPY_SOURCE_QSTR
@@ -553,6 +585,20 @@ set_source_files_properties(
     ${MICROPY_PY_DIR}/map.c
     ${MICROPY_PY_DIR}/mpz.c
     ${MICROPY_PY_DIR}/vm.c
+
+    ${SYNTH_DEXED_LIB_DIR}/synth_dexed.cpp
+    ${SYNTH_DEXED_LIB_DIR}/EngineOpl.cpp
+    ${SYNTH_DEXED_LIB_DIR}/EngineMsfa.cpp
+    ${SYNTH_DEXED_LIB_DIR}/EngineMkI.cpp
+    ${SYNTH_DEXED_LIB_DIR}/dx7note.cpp
+    ${SYNTH_DEXED_LIB_DIR}/dexed.cpp
+    ${SYNTH_DEXED_LIB_DIR}/arm_math.c
+    ${SYNTH_DEXED_LIB_DIR}/env.cpp
+    ${SYNTH_DEXED_LIB_DIR}/fm_op_kernel.cpp
+    ${SYNTH_DEXED_LIB_DIR}/lfo.cpp
+    ${SYNTH_DEXED_LIB_DIR}/pitchenv.cpp
+    ${SYNTH_DEXED_LIB_DIR}/sin.cpp
+
     PROPERTIES
     COMPILE_OPTIONS "-O2"
 )
@@ -601,8 +647,8 @@ target_link_libraries(${MICROPY_TARGET}
 )
 
 if (MICROPY_HW_ENABLE_DOUBLE_TAP)
-# Enable double tap reset into bootrom.
-target_link_libraries(${MICROPY_TARGET}
+    # Enable double tap reset into bootrom.
+    target_link_libraries(${MICROPY_TARGET}
     pico_bootsel_via_double_reset
 )
 endif()
