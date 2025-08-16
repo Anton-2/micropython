@@ -1,0 +1,14 @@
+{
+  "deploy": ["../deploy.md"],
+  "docs": "",
+  "features": ["Dual-core", "External Flash", "USB"],
+  "images": ["rp2-pico2.jpg"],
+  "mcu": "rp2350",
+  "product": "WS rp2350 lcd",
+  "thumbnail": "",
+  "url": "https://www.waveshare.com/rp2350-lcd-0.96.htm",
+  "variants": {
+    "RISCV": "RISC-V CPU mode"
+  },
+  "vendor": "Waveshare"
+}
