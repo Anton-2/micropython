@@ -5,7 +5,7 @@ MPY_DIR = ../../..
 MOD = fast_font
 
 # Source files (.c or .py)
-SRC = fast_font2.c
+SRC = fast_font2.c wave.c
 
 # Architecture to build for (x86, x64, armv7m, xtensa, xtensawin, rv32imc)
 # ARCH = armv7m
@@ -14,7 +14,7 @@ SRC = fast_font2.c
 # CFLAGS += -O3
 
 # LDFLAGS += -lm
-LINK_RUNTIME = 1
+LINK_RUNTIME = 0
 
 # Include to get the rules for compiling and linking the module
 include $(MPY_DIR)/py/dynruntime.mk
