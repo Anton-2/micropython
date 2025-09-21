@@ -1,5 +1,4 @@
 // Include the header file to get access to the MicroPython API
-#include "py/dynruntime.h"
 #include <stdint.h>
 #include "wave.h"
 
@@ -490,34 +489,89 @@ static void propertyclass_attr(mp_obj_t self_in, qstr attribute, mp_obj_t *desti
 mp_obj_full_type_t mp_type_wave;
 
 // Locals dict for the Wave type.
-mp_map_elem_t wave_locals_dict_table[4];
+mp_map_elem_t wave_locals_dict_table[7];
 
 static MP_DEFINE_CONST_DICT(wave_locals_dict, wave_locals_dict_table);
 
-// Essentially Wave.__new__ (but also kind of __init__).
-// Takes source sample buffer as first arg
-static mp_obj_t wave_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args_in) {
-    mp_arg_check_num(n_args, n_kw, 1, 1, false);
+static void _wave_init(mp_obj_wave_t *self, size_t n_args, const mp_obj_t *args_in) {
+
+    if (n_args == 2) {
+        mp_raise_ValueError("should provide loop_start and loop_end, or nothing");
+    }
 
     mp_buffer_info_t src_buffer;
     if (!mp_get_buffer(args_in[0], &src_buffer, MP_BUFFER_READ)) {
         mp_raise_TypeError("src buffer (read) expected");
     }
 
-    mp_obj_wave_t *o = mp_obj_malloc(mp_obj_wave_t, type);
+    if ((src_buffer.len/2) > MAX_SAMPLE_COUNT) {
+        mp_raise_ValueError("sample buffer too long");
+    }
 
-    o->player.src = src_buffer.buf;
-    o->player.src_count = src_buffer.len/2;
+    uint32_t loop_start = 0;
+    uint32_t loop_end = 0;
 
-    o->player.phase = 0;
-    o->player.phase_inc = 1<<16;
-    o->player.running = false;
-    o->player.bloc.start = 0;
-    o->player.bloc.end = 0;
-    o->player.bloc.data = NULL;
+    if (n_args == 3) {
+        loop_start = mp_obj_get_int(args_in[1]);
+        loop_end = mp_obj_get_int(args_in[2]);
+        if (loop_start >= loop_end) {
+            mp_raise_ValueError("loop_start must be less than loop_end");
+        }
+        if (loop_end > MAX_SAMPLE_COUNT) {
+            mp_raise_ValueError("loop too long for PHASE_SHIFT");
+        }
 
-    return MP_OBJ_FROM_PTR(o);
+    }
+
+    self->player.src = src_buffer.buf;
+    self->player.src_count = src_buffer.len/2;
+
+    self->player.loop_start = loop_start<<PHASE_SHIFT;
+    self->player.loop_end = loop_end<<PHASE_SHIFT;
+    self->player.loop_end_save = self->player.loop_end;
+
+    self->player.phase = 0;
+    self->player.phase_inc = 0;
+
+    self->player.running = false;
+    self->player.bloc.start = 0;
+    self->player.bloc.end = 0;
+    self->player.bloc.data = NULL;
+
 }
+
+// Essentially Wave.__new__ (but also kind of __init__).
+// Takes source sample buffer as first arg
+static mp_obj_t wave_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args_in) {
+    mp_arg_check_num(n_args, n_kw, 1, 3, false);
+
+    mp_obj_wave_t *self = mp_obj_malloc(mp_obj_wave_t, type);
+    _wave_init(self, n_args, args_in);
+    return MP_OBJ_FROM_PTR(self);
+}
+
+// Implements Wave.init()
+static mp_obj_t wave_init(size_t n_args, const mp_obj_t *args) {
+    mp_obj_wave_t *self = MP_OBJ_TO_PTR(args[0]);
+    _wave_init(self, n_args-1, args+1);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(wave_init_obj, 2, 4, wave_init);
+
+
+// Implements Wave.loop(<state>)
+static mp_obj_t wave_loop(size_t n_args, const mp_obj_t *args) {
+    mp_obj_wave_t *self = MP_OBJ_TO_PTR(args[0]);
+
+    if (n_args == 2) {
+        _Bool loop_on = mp_obj_get_int(args[1]);
+        self->player.loop_end = loop_on ? self->player.loop_end_save : 0;
+    }
+
+    return mp_obj_new_bool(self->player.loop_end != 0);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(wave_loop_obj, 1, 2, wave_loop);
+
 
 // Implements Wave.play(phase_inc)
 static mp_obj_t wave_play(mp_obj_t self_in, mp_obj_t phase_inc_in) {
@@ -530,24 +584,37 @@ static mp_obj_t wave_play(mp_obj_t self_in, mp_obj_t phase_inc_in) {
 static MP_DEFINE_CONST_FUN_OBJ_2(wave_play_obj, wave_play);
 
 // Implements Wave.fill(buffer)
-static mp_obj_t wave_fill(mp_obj_t self_in, mp_obj_t dst_in, mp_obj_t clear_in) {
-    mp_obj_wave_t *self = MP_OBJ_TO_PTR(self_in);
+static mp_obj_t wave_fill(size_t n_args, const mp_obj_t *args) {
+
+    mp_obj_wave_t *self = MP_OBJ_TO_PTR(args[0]);
+
+    mp_buffer_info_t amp_buffer;
+    if (!mp_get_buffer(args[1], &amp_buffer, MP_BUFFER_READ)) {
+        mp_raise_TypeError("amp buffer (read) expected");
+    }
 
     mp_buffer_info_t dst_buffer;
-    if (!mp_get_buffer(dst_in, &dst_buffer, MP_BUFFER_READ)) {
+    if (!mp_get_buffer(args[2], &dst_buffer, MP_BUFFER_WRITE)) {
         mp_raise_TypeError("dst buffer (write) expected");
     }
 
-    int clear = mp_obj_get_int(clear_in);
-    if (clear) {
-        memset(dst_buffer.buf, 0, dst_buffer.len);
+    if (amp_buffer.len != dst_buffer.len) {
+        mp_raise_TypeError("amp and dst buffer size mismatch");
     }
 
-    _Bool ret = player_fill(&self->player, dst_buffer.buf, dst_buffer.len/4);
+    if (n_args==4) {
+        int clear = mp_obj_get_int(args[3]);
+        if (clear) {
+            memset(dst_buffer.buf, 0, dst_buffer.len);
+        }
+    }
+
+    _Bool ret = player_fill(&self->player, amp_buffer.buf, dst_buffer.buf, dst_buffer.len/4);
 
     return mp_obj_new_bool(ret);
 }
-static MP_DEFINE_CONST_FUN_OBJ_3(wave_fill_obj, wave_fill);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(wave_fill_obj, 3, 4, wave_fill);
+
 
 // Implements Wave.eg_fill(buffer)
 static mp_obj_t wave_eg_fill(mp_obj_t self_in, mp_obj_t dst_in) {
@@ -565,29 +632,40 @@ static mp_obj_t wave_eg_fill(mp_obj_t self_in, mp_obj_t dst_in) {
 static MP_DEFINE_CONST_FUN_OBJ_2(wave_eg_fill_obj, wave_eg_fill);
 
 
-// Implements Wave.eg_trigger(regions or None)
-// regions is in R ADS order : starts at 1, don't advance after last, go to idx=0 for release. Allows for more complicated EG like Hold Atc Hold Rel Seustain
-static mp_obj_t wave_eg_trigger(mp_obj_t self_in, mp_obj_t regions_in) {
-    mp_obj_wave_t *self = MP_OBJ_TO_PTR(self_in);
-
-    if (regions_in == mp_const_none) {
-        set_region(&self->eg, 0);
-        return mp_const_none;
-    }
+// Implements Wave.eg_trigger(regions, [init_value])
+static mp_obj_t wave_eg_trigger(size_t n_args, const mp_obj_t *args) {
+    mp_obj_wave_t *self = MP_OBJ_TO_PTR(args[0]);
 
     mp_buffer_info_t regions;
-    if (!mp_get_buffer(regions_in, &regions, MP_BUFFER_READ)) {
+    if (!mp_get_buffer(args[1], &regions, MP_BUFFER_READ)) {
         mp_raise_TypeError("regions (read) expected");
     }
-
-    self->eg.regions = regions.buf;
     self->eg.region_count = regions.len / sizeof(EgRegion);
-    set_region(&self->eg, 2);
-    self->eg.value = 0;
+    self->eg.regions = regions.buf;
+
+    set_region(&self->eg, 0);
+
+    if (n_args == 3) {
+        mp_int_t value = mp_obj_get_int(args[2]);
+        self->eg.value = value;
+    }
 
     return mp_const_none;
 }
-static MP_DEFINE_CONST_FUN_OBJ_2(wave_eg_trigger_obj, wave_eg_trigger);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(wave_eg_trigger_obj, 2, 3, wave_eg_trigger);
+
+// Implements Wave.eg_value([value])
+static mp_obj_t wave_eg_value(size_t n_args, const mp_obj_t *args) {
+    mp_obj_wave_t *self = MP_OBJ_TO_PTR(args[0]);
+
+    if (n_args == 2) {
+        self->eg.value = mp_obj_get_int(args[1]);
+    }
+
+    return mp_obj_new_int(self->eg.value);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(wave_eg_value_obj, 1, 2, wave_eg_value);
+
 
 
 
@@ -624,16 +702,21 @@ mp_obj_t mpy_init(mp_obj_fun_bc_t *self, size_t n_args, size_t n_kw, mp_obj_t *a
     mp_type_wave.name = MP_QSTR_Wave;
     MP_OBJ_TYPE_SET_SLOT(&mp_type_wave, make_new, wave_make_new, 0);
 
-    wave_locals_dict_table[0] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_play), MP_OBJ_FROM_PTR(&wave_play_obj) };
-    wave_locals_dict_table[1] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_fill), MP_OBJ_FROM_PTR(&wave_fill_obj) };
+    wave_locals_dict_table[0] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_init), MP_OBJ_FROM_PTR(&wave_init_obj) };
+    wave_locals_dict_table[1] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_play), MP_OBJ_FROM_PTR(&wave_play_obj) };
+    wave_locals_dict_table[2] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_fill), MP_OBJ_FROM_PTR(&wave_fill_obj) };
+    wave_locals_dict_table[3] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_loop), MP_OBJ_FROM_PTR(&wave_loop_obj) };
 
-    wave_locals_dict_table[2] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_eg_trigger), MP_OBJ_FROM_PTR(&wave_eg_trigger_obj) };
-    wave_locals_dict_table[3] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_eg_fill), MP_OBJ_FROM_PTR(&wave_eg_fill_obj) };
+    wave_locals_dict_table[4] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_eg_trigger), MP_OBJ_FROM_PTR(&wave_eg_trigger_obj) };
+    wave_locals_dict_table[5] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_eg_fill), MP_OBJ_FROM_PTR(&wave_eg_fill_obj) };
+    wave_locals_dict_table[6] = (mp_map_elem_t){ MP_OBJ_NEW_QSTR(MP_QSTR_eg_value), MP_OBJ_FROM_PTR(&wave_eg_value_obj) };
 
     MP_OBJ_TYPE_SET_SLOT(&mp_type_wave, locals_dict, (void*)&wave_locals_dict, 1);
 
     // Make the Wave type available on the module.
     mp_store_global(MP_QSTR_Wave, MP_OBJ_FROM_PTR(&mp_type_wave));
+
+    mp_store_global(MP_QSTR_ONE_PHASE, MP_OBJ_NEW_SMALL_INT(1<<PHASE_SHIFT));
 
     // This must be last, it restores the globals dict
     MP_DYNRUNTIME_INIT_EXIT
