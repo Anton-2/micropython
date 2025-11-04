@@ -1,0 +1,1 @@
+/Users/anton/Downloads/openocd-0/openocd --search ~/Downloads/openocd-0/scripts -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 5000" -c "program build-AE_PICO2_NOUSB/firmware.elf verify reset exit"
