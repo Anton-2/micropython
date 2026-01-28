@@ -30,8 +30,7 @@
  * or the version with TOC: https://jpa.kapsi.fi/stuff/other/SDIO_toc.pdf
  */
 
-
-#include <cstdint>
+#include "sdio_rp2350.h"
 #include <hardware/pio.h>
 #include <hardware/dma.h>
 #include <hardware/gpio.h>
@@ -40,7 +39,6 @@
 #include <string.h>
 
 #include "sdio_rp2350.pio.h"
-#include "sdio_rp2350.h"
 
 enum sdio_transfer_state_t {
     SDIO_IDLE, // No transfer running, sdio_cmd program is giving continuous clock
@@ -67,6 +65,7 @@ static struct {
     // Needed for timeout calculation
     uint32_t cmd_clock_hz;
     uint32_t data_clock_hz;
+    rp2350_sdio_timing_t timing;
 
     // Variables for block writes
     uint64_t next_wr_block_checksum;
@@ -87,6 +86,11 @@ static struct {
         pio_sm_config data_tx;
     } pio_cfg;
 
+    // We have to switch between rx/tx programs because they won't
+    // both fit in PIO RAM.
+    const pio_program_t *pio_loaded_data_prog;
+    uint32_t pio_loaded_data_prog_offset;
+
     // DMA configuration blocks
     // This is used to perform DMA into data buffers and checksum buffers separately.
     struct {
@@ -102,6 +106,8 @@ static struct {
 } g_sdio;
 
 static void rp2350_sdio_dma_irq();
+static uint32_t adjust_clk_add_program(const struct pio_program *program, int extra_delay_0, int extra_delay_1);
+static void compute_prescaler_delay(int divider, int min_divider, int *prescaler, int *delay);
 
 /*******************************************************
  * Checksum algorithms
@@ -405,6 +411,93 @@ sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response,
     return SDIO_OK;
 }
 
+/*******************************************************
+ * Data reception from SD card
+ *******************************************************/
+
+static void load_pio_data_rx_program()
+{
+    const pio_program *program;
+
+    // Figure which data transfer PIO program we need
+    if (!g_sdio.timing.use_high_speed)
+        program = &sdio_data_rx_program;
+    else if (g_sdio.timing.data_clk_divider >= 3)
+        program = &sdio_data_rx_hs_program;
+    else
+        program = &sdio_data_rx_hs_oc_program;
+
+    if (program == g_sdio.pio_loaded_data_prog)
+    {
+        // Already loaded
+        return;
+    }
+
+    if (g_sdio.pio_loaded_data_prog != NULL)
+    {
+        // Unload previous program
+        pio_remove_program(SDIO_PIO, g_sdio.pio_loaded_data_prog, g_sdio.pio_loaded_data_prog_offset);
+        g_sdio.pio_loaded_data_prog = NULL;
+    }
+
+    if (program == &sdio_data_rx_program)
+    {
+        // The standard speed program implements clock dividers >= 6.
+        // Standard speed delays can be adjusted on both edges
+        int prescaler, delay;
+        compute_prescaler_delay(g_sdio.timing.data_clk_divider, SDIO_MIN_DATA_CLK_DIVIDER, &prescaler, &delay);
+        int delay0 = delay / 2;
+        int delay1 = delay - delay0;
+        SDIO_DBGMSG("SDIO data clock adjustment", delay0, delay1);
+        g_sdio.pio_offset.data_rx = adjust_clk_add_program(program, delay0, delay1);
+
+        // Data reception program config
+        pio_sm_config cfg = sdio_data_rx_program_get_default_config(g_sdio.pio_offset.data_rx);
+        sm_config_set_in_pins(&cfg, SDIO_D0);
+        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
+        sm_config_set_jmp_pin(&cfg, SDIO_D0);
+        sm_config_set_clkdiv_int_frac(&cfg, prescaler, 0);
+        g_sdio.pio_cfg.data_rx = cfg;
+
+        // Reception clock speed for timeout calculation
+        g_sdio.data_clock_hz = clock_get_hz(clk_sys) / prescaler / (delay + SDIO_MIN_DATA_CLK_DIVIDER);
+    }
+    else if (program == &sdio_data_rx_hs_program)
+    {
+        // The main high-speed data program implements clock dividers >= 3.
+        // High-speed data instruction delays should be adjusted only on CLK=0 state.
+        int delay0 = (g_sdio.timing.data_clk_divider - 3);
+        SDIO_DBGMSG("SDIO HS data clock adjustment", delay0, 0);
+        g_sdio.pio_offset.data_rx = adjust_clk_add_program(&sdio_data_rx_hs_program, delay0, 0);
+
+        // Data reception program config
+        pio_sm_config cfg = sdio_data_rx_hs_program_get_default_config(g_sdio.pio_offset.data_rx);
+        sm_config_set_in_pins(&cfg, SDIO_D0);
+        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
+        sm_config_set_jmp_pin(&cfg, SDIO_D0);
+        g_sdio.pio_cfg.data_rx = cfg;
+
+        g_sdio.data_clock_hz = clock_get_hz(clk_sys) / (delay0 + 3);
+    }
+    else
+    {
+        // High-speed overclock mode always uses /2 divider.
+        g_sdio.pio_offset.data_rx = pio_add_program(SDIO_PIO, &sdio_data_rx_hs_oc_program);
+
+        // Data reception program config
+        pio_sm_config cfg = sdio_data_rx_hs_oc_program_get_default_config(g_sdio.pio_offset.data_rx);
+        sm_config_set_in_pins(&cfg, SDIO_D0);
+        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
+        sm_config_set_jmp_pin(&cfg, SDIO_D0);
+        g_sdio.pio_cfg.data_rx = cfg;
+
+        g_sdio.data_clock_hz = clock_get_hz(clk_sys) / 2;
+    }
+
+    g_sdio.pio_loaded_data_prog = program;
+    g_sdio.pio_loaded_data_prog_offset = g_sdio.pio_offset.data_rx;
+}
+
 sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize = SDIO_BLOCK_SIZE)
 {
     // Buffer must be aligned
@@ -420,6 +513,7 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
         sdio_enable_clk(false);
         pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
         pio_sm_clear_fifos(SDIO_PIO, SDIO_SM);
+        load_pio_data_rx_program();
 
         // Preconfigure first DMA channel for reading from the PIO RX fifo
         dma_channel_config dmacfg = dma_channel_get_default_config(SDIO_DMACH_A);
@@ -448,8 +542,16 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
         // 2 per byte, plus 16 for checksum, plus 8 for trailing clocks
         // minus one because how PIO counter works
         int nibbles = blocksize * 2 + 16 + 8 - 1;
+
+        // In high speed mode, one extra clock edge is issued after capturing the last nibble,
+        // so subtract one. In overclock mode, two extra edges.
+        if (g_sdio.pio_loaded_data_prog == &sdio_data_rx_hs_program)
+            nibbles -= 1;
+        else if (g_sdio.pio_loaded_data_prog == &sdio_data_rx_hs_oc_program)
+            nibbles -= 2;
+
         pio_sm_put(SDIO_PIO, SDIO_SM, nibbles);
-        pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_out(pio_y, 32));
+        pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_out(pio_y, 32) | pio_encode_sideset(1, 1));
 
         // Enable RX FIFO join because we don't need the TX FIFO during transfer.
         // This gives more leeway for the DMA block switching
@@ -649,6 +751,15 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
 
     if (g_sdio.transfer_state == SDIO_RX_DONE || g_sdio.transfer_state == SDIO_IDLE)
     {
+        /*
+        if (g_sdio.transfer_state == SDIO_IDLE) {
+            SDIO_ERRMSG("Cosmigroxkt", 0, 0);
+        }
+        */
+        if (blocks_complete)
+        {
+            *blocks_complete = g_sdio.total_blocks;
+        }
         return SDIO_OK;
     }
     else if (SDIO_ELAPSED_US(g_sdio.transfer_start_time) > SDIO_TRANSFER_TIMEOUT_US)
@@ -665,7 +776,74 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
  * Data transmission to SD card
  *******************************************************/
 
- static void sdio_start_next_block_tx()
+static void load_pio_data_tx_program()
+{
+    const pio_program *program;
+
+    // Figure which data transfer PIO program we need
+    if (!g_sdio.timing.use_high_speed)
+        program = &sdio_data_tx_program;
+    else
+        program = &sdio_data_tx_hs_program;
+
+    if (program == g_sdio.pio_loaded_data_prog)
+    {
+        // Already loaded
+        return;
+    }
+
+    if (g_sdio.pio_loaded_data_prog != NULL)
+    {
+        // Unload previous program
+        pio_remove_program(SDIO_PIO, g_sdio.pio_loaded_data_prog, g_sdio.pio_loaded_data_prog_offset);
+        g_sdio.pio_loaded_data_prog = NULL;
+    }
+
+    if (program == &sdio_data_tx_program)
+    {
+        // The standard speed program implements clock dividers >= 6.
+        // Standard speed delays can be adjusted on both edges
+        int prescaler, delay;
+        compute_prescaler_delay(g_sdio.timing.data_clk_divider, SDIO_MIN_DATA_CLK_DIVIDER, &prescaler, &delay);
+        int delay0 = delay / 2;
+        int delay1 = delay - delay0;
+        SDIO_DBGMSG("SDIO data clock adjustment", delay0, delay1);
+        g_sdio.pio_offset.data_tx = adjust_clk_add_program(program, delay0, delay1);
+
+        // Data transmission program config
+        pio_sm_config cfg = sdio_data_tx_program_get_default_config(g_sdio.pio_offset.data_tx);
+        sm_config_set_in_pins(&cfg, SDIO_D0);
+        sm_config_set_set_pins(&cfg, SDIO_D0, 4);
+        sm_config_set_out_pins(&cfg, SDIO_D0, 4);
+        sm_config_set_jmp_pin(&cfg, SDIO_D0);
+        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
+        sm_config_set_clkdiv_int_frac(&cfg, prescaler, 0);
+        g_sdio.pio_cfg.data_tx = cfg;
+    }
+    else
+    {
+        // The high-speed data transmission program implements clock dividers >= 3.
+        // High-speed data instruction delays should be adjusted only on CLK=0 state.
+        int delay0 = (g_sdio.timing.data_clk_divider - 3);
+        if (delay0 < 0) delay0 = 0;
+        SDIO_DBGMSG("SDIO HS data clock adjustment", delay0, 0);
+        g_sdio.pio_offset.data_tx = adjust_clk_add_program(program, delay0, 0);
+
+        // Data transmission program config
+        pio_sm_config cfg = sdio_data_tx_hs_program_get_default_config(g_sdio.pio_offset.data_tx);
+        sm_config_set_in_pins(&cfg, SDIO_D0);
+        sm_config_set_set_pins(&cfg, SDIO_D0, 4);
+        sm_config_set_out_pins(&cfg, SDIO_D0, 4);
+        sm_config_set_jmp_pin(&cfg, SDIO_D0);
+        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
+        g_sdio.pio_cfg.data_tx = cfg;
+    }
+
+    g_sdio.pio_loaded_data_prog = program;
+    g_sdio.pio_loaded_data_prog_offset = g_sdio.pio_offset.data_tx;
+}
+
+static void sdio_start_next_block_tx()
 {
     // Prepare second DMA channel to send the CRC and block end marker
     uint64_t crc = g_sdio.next_wr_block_checksum;
@@ -732,6 +910,7 @@ sdio_status_t rp2350_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks, u
         // Initialize PIO
         sdio_enable_clk(false);
         pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
+        load_pio_data_tx_program();
         pio_sm_init(SDIO_PIO, SDIO_SM, g_sdio.pio_offset.data_tx, &g_sdio.pio_cfg.data_tx);
 
         // Preconfigure DMA to send the data block payload
@@ -1078,13 +1257,16 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
     }
 
     memset(&g_sdio, 0, sizeof(g_sdio));
+    g_sdio.timing = timing;
 
     dma_channel_abort(SDIO_DMACH_A);
     dma_channel_abort(SDIO_DMACH_B);
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
 
-    // Load PIO programs and do clock speed adjustment
+    // Clear PIO memory and prepare the command program
+    // Data programs are loaded when needed
     pio_clear_instruction_memory(SDIO_PIO);
+    g_sdio.pio_loaded_data_prog = NULL;
 
     {
         // Adjust command clock speed
@@ -1117,90 +1299,6 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
         g_sdio.pio_cfg.sdio_cmd = cfg;
 
         g_sdio.cmd_clock_hz = clock_get_hz(clk_sys) / prescaler / (delay + SDIO_MIN_CMD_CLK_DIVIDER);
-    }
-
-    if (!timing.use_high_speed)
-    {
-        // The standard speed program implements clock dividers >= 6.
-        // Standard speed delays can be adjusted on both edges
-        int prescaler, delay;
-        compute_prescaler_delay(timing.data_clk_divider, SDIO_MIN_DATA_CLK_DIVIDER, &prescaler, &delay);
-        int delay0 = delay / 2;
-        int delay1 = delay - delay0;
-        SDIO_DBGMSG("SDIO data clock adjustment", delay0, delay1);
-        g_sdio.pio_offset.data_rx = adjust_clk_add_program(&sdio_data_rx_program, delay0, delay1);
-        g_sdio.pio_offset.data_tx = adjust_clk_add_program(&sdio_data_tx_program, delay0, delay1);
-
-        // Data reception program config
-        pio_sm_config cfg = sdio_data_rx_program_get_default_config(g_sdio.pio_offset.data_rx);
-        sm_config_set_in_pins(&cfg, SDIO_D0);
-        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
-        sm_config_set_jmp_pin(&cfg, SDIO_D0);
-        sm_config_set_clkdiv_int_frac(&cfg, prescaler, 0);
-        g_sdio.pio_cfg.data_rx = cfg;
-
-        // Data transmission program config
-        cfg = sdio_data_tx_program_get_default_config(g_sdio.pio_offset.data_tx);
-        sm_config_set_in_pins(&cfg, SDIO_D0);
-        sm_config_set_set_pins(&cfg, SDIO_D0, 4);
-        sm_config_set_out_pins(&cfg, SDIO_D0, 4);
-        sm_config_set_jmp_pin(&cfg, SDIO_D0);
-        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
-        sm_config_set_clkdiv_int_frac(&cfg, prescaler, 0);
-        g_sdio.pio_cfg.data_tx = cfg;
-
-        g_sdio.data_clock_hz = clock_get_hz(clk_sys) / prescaler / (delay + SDIO_MIN_DATA_CLK_DIVIDER);
-    }
-    else if (timing.data_clk_divider >= 3)
-    {
-        // The main high-speed data program implements clock dividers >= 3.
-        // High-speed data instruction delays should be adjusted only on CLK=0 state.
-        int delay0 = (timing.data_clk_divider - 3);
-        SDIO_DBGMSG("SDIO HS data clock adjustment", delay0, 0);
-        g_sdio.pio_offset.data_rx = adjust_clk_add_program(&sdio_data_rx_hs_program, delay0, 0);
-        g_sdio.pio_offset.data_tx = adjust_clk_add_program(&sdio_data_tx_hs_program, delay0, 0);
-
-        // Data reception program config
-        pio_sm_config cfg = sdio_data_rx_hs_program_get_default_config(g_sdio.pio_offset.data_rx);
-        sm_config_set_in_pins(&cfg, SDIO_D0);
-        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
-        sm_config_set_jmp_pin(&cfg, SDIO_D0);
-        g_sdio.pio_cfg.data_rx = cfg;
-
-        // Data transmission program config
-        cfg = sdio_data_tx_hs_program_get_default_config(g_sdio.pio_offset.data_tx);
-        sm_config_set_in_pins(&cfg, SDIO_D0);
-        sm_config_set_set_pins(&cfg, SDIO_D0, 4);
-        sm_config_set_out_pins(&cfg, SDIO_D0, 4);
-        sm_config_set_jmp_pin(&cfg, SDIO_D0);
-        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
-        g_sdio.pio_cfg.data_tx = cfg;
-
-        g_sdio.data_clock_hz = clock_get_hz(clk_sys) / (delay0 + 3);
-    }
-    else
-    {
-        // High-speed overclock mode always uses /2 divider.
-        g_sdio.pio_offset.data_rx = pio_add_program(SDIO_PIO, &sdio_data_rx_hs_oc_program);
-        g_sdio.pio_offset.data_tx = pio_add_program(SDIO_PIO, &sdio_data_tx_hs_program);
-
-        // Data reception program config
-        pio_sm_config cfg = sdio_data_rx_hs_oc_program_get_default_config(g_sdio.pio_offset.data_rx);
-        sm_config_set_in_pins(&cfg, SDIO_D0);
-        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
-        sm_config_set_jmp_pin(&cfg, SDIO_D0);
-        g_sdio.pio_cfg.data_rx = cfg;
-
-        // Data transmission program config
-        cfg = sdio_data_tx_hs_program_get_default_config(g_sdio.pio_offset.data_tx);
-        sm_config_set_in_pins(&cfg, SDIO_D0);
-        sm_config_set_set_pins(&cfg, SDIO_D0, 4);
-        sm_config_set_out_pins(&cfg, SDIO_D0, 4);
-        sm_config_set_jmp_pin(&cfg, SDIO_D0);
-        sm_config_set_sideset_pins(&cfg, SDIO_CLK);
-        g_sdio.pio_cfg.data_tx = cfg;
-
-        g_sdio.data_clock_hz = clock_get_hz(clk_sys) / 2;
     }
 
     // Disable SDIO pins input synchronizer.

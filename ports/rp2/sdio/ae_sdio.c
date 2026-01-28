@@ -3,16 +3,20 @@
 #include "ae_sdio.h"
 #include "sdio_rp2350.h"
 
+
 static uint32_t result;
 
 // status= command_u32(command, arg, flags), set result as cmd response
 static mp_obj_t sdio_command_u32(mp_obj_t command_in, mp_obj_t arg_in, mp_obj_t flags_in) {
 
-    const uint8_t command = mp_obj_get_int(command_in);
-    const uint32_t arg = mp_obj_get_int(arg_in);
+    const uint32_t command = mp_obj_get_int(command_in);
+    uint32_t arg = mp_obj_get_int(arg_in);
     const uint32_t flags = mp_obj_get_int(flags_in);
 
-    const sdio_status_t status = rp2350_sdio_command_u32(command, arg, &result, flags);
+    // mpy use 31 bit ints, top 8 bits of arg are in command 8-15, and real command in 0-7
+    arg |= ((command>>8)&0xFF)<<24;
+
+    const sdio_status_t status = rp2350_sdio_command_u32(command&0xFF, arg, &result, flags);
 
     return mp_obj_new_int(status);
 }
@@ -50,11 +54,7 @@ static mp_obj_t sdio_rx_start(size_t n_args, const mp_obj_t *args) {
 
     uint32_t blocksize = (n_args==2) ? mp_obj_get_int(args[1]) : SDIO_BLOCK_SIZE;
 
-    const uint32_t num_blocks = bufinfo.len / blocksize;
-
-    if (num_blocks*blocksize != bufinfo.len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("buffer size must be a multiple of block size"));
-    }
+    const uint32_t num_blocks = (blocksize >= SDIO_BLOCK_SIZE) ? bufinfo.len / blocksize : 1;
 
     const sdio_status_t status = rp2350_sdio_rx_start(bufinfo.buf, num_blocks, blocksize);
     return mp_obj_new_int(status);
@@ -107,6 +107,7 @@ static const mp_rom_map_elem_t ae_sdio_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_init), MP_ROM_PTR(&init_obj) },
     { MP_ROM_QSTR(MP_QSTR_result), MP_ROM_PTR(&result_obj) },
     { MP_ROM_QSTR(MP_QSTR_is_busy), MP_ROM_PTR(&is_busy_obj) },
+    { MP_ROM_QSTR(MP_QSTR_SDCard), MP_ROM_PTR(&machine_sdcard_type) },
 };
 static MP_DEFINE_CONST_DICT(ae_sdio_module_globals, ae_sdio_module_globals_table);
 

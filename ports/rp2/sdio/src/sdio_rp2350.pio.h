@@ -169,7 +169,7 @@ static inline pio_sm_config sdio_data_rx_program_get_default_config(uint offset)
 // --------------- //
 
 #define sdio_data_rx_hs_wrap_target 0
-#define sdio_data_rx_hs_wrap 6
+#define sdio_data_rx_hs_wrap 7
 #define sdio_data_rx_hs_pio_version 0
 
 static const uint16_t sdio_data_rx_hs_program_instructions[] = {
@@ -179,15 +179,16 @@ static const uint16_t sdio_data_rx_hs_program_instructions[] = {
     0xb142, //  2: nop                    side 1 [1]
     0x4004, //  3: in     pins, 4         side 0
     0x1143, //  4: jmp    x--, 3          side 1 [1]
-    0xb025, //  5: mov    x, status       side 1
-    0x1025, //  6: jmp    !x, 5           side 1
+    0x9020, //  5: push   block           side 1
+    0xb025, //  6: mov    x, status       side 1
+    0x1026, //  7: jmp    !x, 6           side 1
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static const struct pio_program sdio_data_rx_hs_program = {
     .instructions = sdio_data_rx_hs_program_instructions,
-    .length = 7,
+    .length = 8,
     .origin = -1,
     .pio_version = sdio_data_rx_hs_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -213,7 +214,7 @@ static inline pio_sm_config sdio_data_rx_hs_program_get_default_config(uint offs
 // ------------------ //
 
 #define sdio_data_rx_hs_oc_wrap_target 0
-#define sdio_data_rx_hs_oc_wrap 6
+#define sdio_data_rx_hs_oc_wrap 7
 #define sdio_data_rx_hs_oc_pio_version 0
 
 static const uint16_t sdio_data_rx_hs_oc_program_instructions[] = {
@@ -223,15 +224,16 @@ static const uint16_t sdio_data_rx_hs_oc_program_instructions[] = {
     0xa042, //  2: nop                    side 0
     0x5004, //  3: in     pins, 4         side 1
     0x0043, //  4: jmp    x--, 3          side 0
-    0xb025, //  5: mov    x, status       side 1
-    0x1025, //  6: jmp    !x, 5           side 1
+    0x9020, //  5: push   block           side 1
+    0xb025, //  6: mov    x, status       side 1
+    0x1026, //  7: jmp    !x, 6           side 1
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static const struct pio_program sdio_data_rx_hs_oc_program = {
     .instructions = sdio_data_rx_hs_oc_program_instructions,
-    .length = 7,
+    .length = 8,
     .origin = -1,
     .pio_version = sdio_data_rx_hs_oc_pio_version,
 #if PICO_PIO_VERSION > 0

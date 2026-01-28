@@ -29,7 +29,16 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+
+#if defined __has_include
+# if __has_include (<sdio_rp2350_config.h>)
+#  include <sdio_rp2350_config.h>
+#else
+#  include <sdio_rp2350_config_example.h>
+# endif
+#else
 # include <sdio_rp2350_config.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,8 +58,12 @@ typedef enum {
     SDIO_ERR_INVALID_PARAM = 10,   // Invalid parameters to function
 } sdio_status_t;
 
-// SDIO driver can optionally log debug and error messages.
+// SDIO driver can optionally log debug, error and critical messages.
 // To enable this, edit sdio_rp2350_config.h
+#ifndef SDIO_CRITMSG
+#define SDIO_CRITMSG(txt, arg1, arg2)
+#endif
+
 #ifndef SDIO_ERRMSG
 #define SDIO_ERRMSG(txt, arg1, arg2)
 #endif
@@ -153,6 +166,16 @@ typedef enum {
 #define SDIO_DEFAULT_SPEED SDIO_HIGHSPEED
 #endif
 
+// Number of CRC errors before automatic fallback to slower clockspeed
+#ifndef SDIO_FALLBACK_CRC_ERROR_COUNT
+#define SDIO_FALLBACK_CRC_ERROR_COUNT 3
+#endif
+
+// Mode to fall back to after multiple CRC errors
+#ifndef SDIO_FALLBACK_MODE
+#define SDIO_FALLBACK_MODE SDIO_STANDARD
+#endif
+
 // If the target communication frequency cannot achieved exactly,
 // we can choose between smaller or higher divider. This specifies
 // how much we can exceed the target clock rate
@@ -237,6 +260,14 @@ rp2350_sdio_timing_t rp2350_sdio_get_timing(rp2350_sdio_mode_t mode);
 // Note that for high speed modes you need to issue CMD6 to card to
 // switch its mode.
 void rp2350_sdio_init(rp2350_sdio_timing_t timing);
+
+#ifdef SDIO_USE_SDFAT
+// Optional callback can be used to do co-operative multitasking while SdFat is reading data.
+// When a transfer to/from buffer is detected, callback gets called during transfer.
+typedef void (*sd_callback_t)(uint32_t bytes_complete);
+void rp2350_sdio_sdfat_set_callback(sd_callback_t func, const uint8_t *buffer);
+#endif
+
 
 #ifdef __cplusplus
 } /* extern "C" */

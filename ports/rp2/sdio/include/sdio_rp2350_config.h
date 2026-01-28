@@ -6,6 +6,21 @@
 // To enable this, uncomment the lines below and define the
 // sdio_log() function in your own code.
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "py/runtime.h"
+
+#define SDIO_CRITMSG(txt, arg1, args) mp_printf(&mp_plat_print, "CRITICAL: %s %08X %08X\n", txt, arg1, arg2);
+#define SDIO_ERRMSG(txt, arg1, arg2) mp_printf(&mp_plat_print, "ERROR: %s %08X %08X\n", txt, arg1, arg2);
+// #define SDIO_DBGMSG(txt, arg1, arg2) mp_printf(&mp_plat_print, "DEBUG: %s %08X %08X\n", txt, arg1, arg2);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+
 // void sdio_log(const char *txt, uint32_t arg1, uint32_t arg2);
 // #define SDIO_ERRMSG(txt, arg1, arg2) sdio_log(txt, arg1, arg2)
 // #define SDIO_DBGMSG(txt, arg1, arg2) sdio_log(txt, arg1, arg2)
@@ -55,11 +70,22 @@
 #define SDIO_DMAIRQ DMA_IRQ_1
 
 // GPIO pins
+/*
 #define SDIO_CLK 16
 #define SDIO_CMD 17
 #define SDIO_D0  18
 #define SDIO_D1  19
 #define SDIO_D2  20
 #define SDIO_D3  21
+*/
+
+#define SDIO_CLK 3
+#define SDIO_CMD 4
+#define SDIO_D0  5
+#define SDIO_D1  6
+#define SDIO_D2  7
+#define SDIO_D3  8
+
+
 
 // 3V GND CLK DO CMD D3 D1 D2 DET
