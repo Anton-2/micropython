@@ -11,10 +11,29 @@ extern "C" {
 #endif
 
 #include "py/runtime.h"
+#include "hardware/pio.h"
 
-#define SDIO_CRITMSG(txt, arg1, args) mp_printf(&mp_plat_print, "CRITICAL: %s %08X %08X\n", txt, arg1, arg2);
+#define SDIO_CRITMSG(txt, arg1, arg2) mp_printf(&mp_plat_print, "CRITICAL: %s %08X %08X\n", txt, arg1, arg2);
 #define SDIO_ERRMSG(txt, arg1, arg2) mp_printf(&mp_plat_print, "ERROR: %s %08X %08X\n", txt, arg1, arg2);
 // #define SDIO_DBGMSG(txt, arg1, arg2) mp_printf(&mp_plat_print, "DEBUG: %s %08X %08X\n", txt, arg1, arg2);
+
+
+// Dynamic resource allocation structure
+typedef struct {
+    PIO pio;
+    int8_t sm;
+    int8_t dma_chan_a;
+    int8_t dma_chan_b;
+    int8_t dma_irq_idx;
+    bool initialized;
+} sdio_resources_t;
+
+// Global resources instance
+extern sdio_resources_t g_sdio_resources;
+
+// Function to allocate SDIO resources (called from machine_sdcard.c)
+int sdio_find_ressources(void);
+void sdio_free_resources(void);
 
 #ifdef __cplusplus
 } /* extern "C" */
@@ -54,20 +73,21 @@ extern "C" {
 // If communication doesn't work, speed is automatically dropped
 // #define SDIO_DEFAULT_SPEED SDIO_HIGHSPEED
 
+
 // PIO block to use
-#define SDIO_PIO pio1
-#define SDIO_SM  0
+#define SDIO_PIO (g_sdio_resources.pio)
+#define SDIO_SM (g_sdio_resources.sm)
 
 // GPIO configuration
-#define SDIO_GPIO_FUNC GPIO_FUNC_PIO1
+#define SDIO_GPIO_FUNC (SDIO_PIO == pio0 ? GPIO_FUNC_PIO0 : (SDIO_PIO == pio1 ? GPIO_FUNC_PIO1 : GPIO_FUNC_PIO2))
 #define SDIO_GPIO_SLEW GPIO_SLEW_RATE_FAST
 #define SDIO_GPIO_DRIVE GPIO_DRIVE_STRENGTH_8MA
 
 // DMA channels to use
-#define SDIO_DMACH_A 4
-#define SDIO_DMACH_B 5
-#define SDIO_DMAIRQ_IDX 1
-#define SDIO_DMAIRQ DMA_IRQ_1
+#define SDIO_DMACH_A (g_sdio_resources.dma_chan_a)
+#define SDIO_DMACH_B (g_sdio_resources.dma_chan_b)
+#define SDIO_DMAIRQ_IDX (g_sdio_resources.dma_irq_idx)
+#define SDIO_DMAIRQ (g_sdio_resources.dma_irq_idx == 0 ? DMA_IRQ_0 : DMA_IRQ_1)
 
 // GPIO pins
 /*

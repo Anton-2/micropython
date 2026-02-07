@@ -4,6 +4,7 @@
 #include "py/mperrno.h"
 #include "extmod/vfs.h"
 #include "include/sdio_rp2350.h"
+#include "include/sdio_rp2350_config.h"
 
 // SD Card commands
 #define SD_CMD_GO_IDLE_STATE        0
@@ -41,6 +42,11 @@ static int sdcard_init_card(machine_sdcard_obj_t *self) {
         return 0;
     }
 
+    // Allocate SDIO resources (PIO, SM, DMA channels)
+    if (sdio_find_ressources() != 0) {
+        return -MP_ENODEV; // Failed to allocate resources
+    }
+
     uint32_t response;
     uint32_t ocr;
     uint32_t rca;
@@ -56,15 +62,15 @@ static int sdcard_init_card(machine_sdcard_obj_t *self) {
     // Establish initial connection with the card
     for (int retries = 0; retries < 5; retries++) {
         mp_hal_delay_us(1000);
-        
+
         // CMD0: GO_IDLE_STATE (no response expected)
         rp2350_sdio_command(SD_CMD_GO_IDLE_STATE, 0, NULL, 0, SDIO_FLAG_NO_LOGMSG);
-        
+
         mp_hal_delay_us(1000);
-        
+
         // CMD8: SEND_IF_COND (check voltage range)
         status = rp2350_sdio_command_u32(SD_CMD_SEND_IF_COND, 0x1AA, &response, SDIO_FLAG_NO_LOGMSG);
-        
+
         if (status == SDIO_OK && response == 0x1AA) {
             self->card_type = 2; // SDHC/SDXC
             break;
@@ -85,9 +91,9 @@ static int sdcard_init_card(machine_sdcard_obj_t *self) {
         }
 
         // ACMD41: SEND_OP_COND
-        status = rp2350_sdio_command_u32(SD_ACMD_SEND_OP_COND, 
+        status = rp2350_sdio_command_u32(SD_ACMD_SEND_OP_COND,
                                           ((1 << 30) | (1 << 28) | (1 << 20)), // SDIO_CARD_OCR_MODE
-                                          &ocr, 
+                                          &ocr,
                                           SDIO_FLAG_NO_CRC | SDIO_FLAG_NO_CMD_TAG);
         if (status != SDIO_OK) {
             return -MP_EIO;
@@ -150,14 +156,14 @@ static int sdcard_init_card(machine_sdcard_obj_t *self) {
     if (status != SDIO_OK) {
         return -MP_EIO;
     }
-    
+
     status = rp2350_sdio_command_u32(SD_CMD_APP_SET_BUS_WIDTH, 2, &response, 0);
     if (status != SDIO_OK) {
         return -MP_EIO;
     }
 
     self->block_len = SDCARD_BLOCK_SIZE;
-    
+
     // Switch to requested speed mode
     timing = rp2350_sdio_get_timing(self->timing_mode);
     rp2350_sdio_init(timing);
@@ -323,7 +329,7 @@ static MP_DEFINE_CONST_FUN_OBJ_3(machine_sdcard_writeblocks_obj, machine_sdcard_
 static mp_obj_t machine_sdcard_ioctl(mp_obj_t self_in, mp_obj_t cmd_in, mp_obj_t arg_in) {
     machine_sdcard_obj_t *self = MP_OBJ_TO_PTR(self_in);
     mp_int_t cmd = mp_obj_get_int(cmd_in);
-    
+
     switch (cmd) {
         case MP_BLOCKDEV_IOCTL_INIT: {
             int ret = sdcard_init_card(self);
@@ -363,12 +369,12 @@ static mp_obj_t sdcard_obj_make_new(const mp_obj_type_t *type, size_t n_args, si
     self->initialized = false;
     self->card_type = 0;
     self->timing_mode = args[ARG_timing].u_int;
-    
+
     // Validate timing mode
     if (self->timing_mode > SDIO_HIGHSPEED_OVERCLOCK) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid timing mode"));
     }
-    
+
     return MP_OBJ_FROM_PTR(self);
 }
 
@@ -377,7 +383,7 @@ static const mp_rom_map_elem_t sdcard_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_readblocks),  MP_ROM_PTR(&machine_sdcard_readblocks_obj) },
     { MP_ROM_QSTR(MP_QSTR_writeblocks), MP_ROM_PTR(&machine_sdcard_writeblocks_obj) },
     { MP_ROM_QSTR(MP_QSTR_ioctl),       MP_ROM_PTR(&machine_sdcard_ioctl_obj) },
-    
+
     // Timing mode constants
     { MP_ROM_QSTR(MP_QSTR_INITIALIZE),            MP_ROM_INT(SDIO_INITIALIZE) },
     { MP_ROM_QSTR(MP_QSTR_MMC),                   MP_ROM_INT(SDIO_MMC) },

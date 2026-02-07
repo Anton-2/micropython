@@ -5,6 +5,7 @@ add_library(usermod_ae_sdio INTERFACE)
 target_sources(usermod_ae_sdio INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/ae_sdio.c
     ${CMAKE_CURRENT_LIST_DIR}/machine_sdcard.c
+    ${CMAKE_CURRENT_LIST_DIR}/sdio_resources.c
     ${CMAKE_CURRENT_LIST_DIR}/src/sdio_rp2350.cpp
 )
 
