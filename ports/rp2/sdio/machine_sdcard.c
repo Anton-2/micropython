@@ -32,6 +32,9 @@ typedef struct _machine_sdcard_obj_t {
     bool initialized;
     uint8_t card_type;
     rp2350_sdio_mode_t timing_mode;
+    uint8_t clk_pin;
+    uint8_t cmd_pin;
+    uint8_t d0_pin;
 } machine_sdcard_obj_t;
 
 
@@ -43,7 +46,7 @@ static int sdcard_init_card(machine_sdcard_obj_t *self) {
     }
 
     // Allocate SDIO resources (PIO, SM, DMA channels)
-    if (sdio_find_ressources() != 0) {
+    if (sdio_find_ressources(self->clk_pin, self->cmd_pin, self->d0_pin) != 0) {
         return -MP_ENODEV; // Failed to allocate resources
     }
 
@@ -356,8 +359,11 @@ static MP_DEFINE_CONST_FUN_OBJ_3(machine_sdcard_ioctl_obj, machine_sdcard_ioctl)
 
 static mp_obj_t sdcard_obj_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
     // Parse arguments
-    enum { ARG_timing };
+    enum { ARG_clk, ARG_cmd, ARG_d0, ARG_timing };
     static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_clk, MP_ARG_INT | MP_ARG_REQUIRED, {.u_int = 0} },
+        { MP_QSTR_cmd, MP_ARG_INT | MP_ARG_REQUIRED, {.u_int = 0} },
+        { MP_QSTR_d0, MP_ARG_INT | MP_ARG_REQUIRED, {.u_int = 0} },
         { MP_QSTR_timing, MP_ARG_INT, {.u_int = SDIO_STANDARD} },
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
@@ -369,6 +375,9 @@ static mp_obj_t sdcard_obj_make_new(const mp_obj_type_t *type, size_t n_args, si
     self->initialized = false;
     self->card_type = 0;
     self->timing_mode = args[ARG_timing].u_int;
+    self->clk_pin = args[ARG_clk].u_int;
+    self->cmd_pin = args[ARG_cmd].u_int;
+    self->d0_pin = args[ARG_d0].u_int;
 
     // Validate timing mode
     if (self->timing_mode > SDIO_HIGHSPEED_OVERCLOCK) {

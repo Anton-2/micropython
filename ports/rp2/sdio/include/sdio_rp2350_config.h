@@ -24,7 +24,9 @@ typedef struct {
     int8_t sm;
     int8_t dma_chan_a;
     int8_t dma_chan_b;
-    int8_t dma_irq_idx;
+    uint8_t clk_pin;
+    uint8_t cmd_pin;
+    uint8_t d0_pin;
     bool initialized;
 } sdio_resources_t;
 
@@ -32,7 +34,7 @@ typedef struct {
 extern sdio_resources_t g_sdio_resources;
 
 // Function to allocate SDIO resources (called from machine_sdcard.c)
-int sdio_find_ressources(void);
+int sdio_find_ressources(uint8_t clk_pin, uint8_t cmd_pin, uint8_t d0_pin);
 void sdio_free_resources(void);
 
 #ifdef __cplusplus
@@ -86,25 +88,22 @@ void sdio_free_resources(void);
 // DMA channels to use
 #define SDIO_DMACH_A (g_sdio_resources.dma_chan_a)
 #define SDIO_DMACH_B (g_sdio_resources.dma_chan_b)
-#define SDIO_DMAIRQ_IDX (g_sdio_resources.dma_irq_idx)
-#define SDIO_DMAIRQ (g_sdio_resources.dma_irq_idx == 0 ? DMA_IRQ_0 : DMA_IRQ_1)
 
-// GPIO pins
-/*
-#define SDIO_CLK 16
-#define SDIO_CMD 17
-#define SDIO_D0  18
-#define SDIO_D1  19
-#define SDIO_D2  20
-#define SDIO_D3  21
-*/
+// DMA IRQ: fixed to 0
+#define SDIO_DMAIRQ_IDX 0
+#define SDIO_DMAIRQ DMA_IRQ_0
 
-#define SDIO_CLK 3
-#define SDIO_CMD 4
-#define SDIO_D0  5
-#define SDIO_D1  6
-#define SDIO_D2  7
-#define SDIO_D3  8
+// PIO IOBASE: forced to 0 to support pins 0-31 only
+// (cannot be dynamic due to compile-time usage in external sdio_rp2350 files)
+#define SDIO_PIO_IOBASE 0
+
+// GPIO pins (dynamic, from g_sdio_resources)
+#define SDIO_CLK (g_sdio_resources.clk_pin)
+#define SDIO_CMD (g_sdio_resources.cmd_pin)
+#define SDIO_D0  (g_sdio_resources.d0_pin)
+#define SDIO_D1  (g_sdio_resources.d0_pin + 1)
+#define SDIO_D2  (g_sdio_resources.d0_pin + 2)
+#define SDIO_D3  (g_sdio_resources.d0_pin + 3)
 
 
 

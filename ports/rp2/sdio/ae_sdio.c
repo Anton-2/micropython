@@ -125,4 +125,6 @@ MP_REGISTER_MODULE(MP_QSTR_ae_sdio, ae_sdio_user_cmodule);
  * mpremote bootloader
  * picotool load -v build-AE_PICO2/firmware.elf
  * picotool reboot
+ *
+ * mpremote mount fw run fw/testcard.py
  */

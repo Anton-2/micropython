@@ -11,7 +11,6 @@ sdio_resources_t g_sdio_resources = {
     .sm = -1,
     .dma_chan_a = -1,
     .dma_chan_b = -1,
-    .dma_irq_idx = 0,
     .initialized = false,
 };
 
@@ -19,10 +18,21 @@ sdio_resources_t g_sdio_resources = {
 static const PIO pio_instances[NUM_PIOS] = {pio0, pio1, pio2};
 
 
-int sdio_find_ressources(void) {
+int sdio_find_ressources(uint8_t clk_pin, uint8_t cmd_pin, uint8_t d0_pin) {
     if (g_sdio_resources.initialized) {
         return 0; // Already found
     }
+
+    // Validate pins: must be in range 0-31 (SDIO_PIO_IOBASE is forced to 0)
+    // D0-D3 are consecutive, so we need d0_pin + 3 <= 31
+    if (clk_pin > 31 || cmd_pin > 31 || (d0_pin + 3) > 31) {
+        return -1; // Invalid pin configuration
+    }
+
+    // Store pin configuration
+    g_sdio_resources.clk_pin = clk_pin;
+    g_sdio_resources.cmd_pin = cmd_pin;
+    g_sdio_resources.d0_pin = d0_pin;
 
     for (uint8_t ch = 0; ch < NUM_DMA_CHANNELS ; ch++) {
         if (dma_channel_is_claimed(ch)) {
@@ -63,10 +73,6 @@ int sdio_find_ressources(void) {
 
     g_sdio_resources.pio = candidate_pio;
     g_sdio_resources.sm = free_sm;
-
-    // Use DMA IRQ 1 by default
-    g_sdio_resources.dma_irq_idx = 1;
-
     g_sdio_resources.initialized = true;
 
     return 0;
