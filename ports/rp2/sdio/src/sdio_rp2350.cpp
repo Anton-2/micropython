@@ -55,6 +55,7 @@ static struct {
     sdio_transfer_state_t transfer_state;
     uint32_t transfer_start_time;
     uint32_t *data_buf;   // Destination or source buffer
+    uint8_t **scatter_addrs; // Scatter gather buffer addresses (NULL if not using scatter gather)
     uint32_t blocksize;   // Block size for this transfer
     uint32_t blocks_done; // Number of blocks transferred so far
     uint32_t total_blocks; // Total number of blocks to transfer
@@ -498,14 +499,10 @@ static void load_pio_data_rx_program()
     g_sdio.pio_loaded_data_prog_offset = g_sdio.pio_offset.data_rx;
 }
 
-sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize = SDIO_BLOCK_SIZE)
+// Internal function to start RX transfer with scatter gather support
+// If scatter_addrs is NULL, uses contiguous buffer starting at first_buffer
+static sdio_status_t rp2350_sdio_rx_start_internal(uint8_t *first_buffer, uint8_t **scatter_addrs, uint32_t num_blocks, uint32_t blocksize)
 {
-    // Buffer must be aligned
-    if (((uint32_t)buffer & 3) != 0 || num_blocks > SDIO_MAX_BLOCKS_PER_REQ)
-    {
-        return SDIO_ERR_INVALID_PARAM;
-    }
-
     // If we are continuing a previous transfer, we don't
     // need to reinitialize PIO and DMA.
     if (g_sdio.transfer_state != SDIO_RX_DONE)
@@ -560,7 +557,8 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
 
     g_sdio.transfer_state = SDIO_RX;
     g_sdio.transfer_start_time = SDIO_TIME_US();
-    g_sdio.data_buf = (uint32_t*)buffer;
+    g_sdio.data_buf = (uint32_t*)first_buffer;
+    g_sdio.scatter_addrs = scatter_addrs;
     g_sdio.blocks_done = 0;
     g_sdio.blocksize = blocksize;
     g_sdio.total_blocks = num_blocks;
@@ -580,7 +578,7 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
 
     uint32_t words_per_block = blocksize / 4;
     dma_channel_set_trans_count(SDIO_DMACH_A, words_per_block, false);
-    dma_channel_set_write_addr(SDIO_DMACH_A, buffer, true);
+    dma_channel_set_write_addr(SDIO_DMACH_A, first_buffer, true);
 
     // Start the state machine
     sdio_enable_clk(true);
@@ -594,8 +592,17 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
         {
             if (i > 0)
             {
-                // Copy block data
-                g_sdio.dma_blocks[i * 2].write_addr = buffer + i * blocksize;
+                // Copy block data to the appropriate address
+                if (scatter_addrs != NULL)
+                {
+                    // Scatter gather: use address from array
+                    g_sdio.dma_blocks[i * 2].write_addr = scatter_addrs[i];
+                }
+                else
+                {
+                    // Contiguous buffer: calculate offset
+                    g_sdio.dma_blocks[i * 2].write_addr = first_buffer + i * blocksize;
+                }
                 g_sdio.dma_blocks[i * 2].transfer_count = blocksize / sizeof(uint32_t);
             }
 
@@ -626,6 +633,42 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
     }
 
     return SDIO_OK;
+}
+
+sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize = SDIO_BLOCK_SIZE)
+{
+    // Buffer must be aligned
+    if (((uint32_t)buffer & 3) != 0 || num_blocks > SDIO_MAX_BLOCKS_PER_REQ)
+    {
+        return SDIO_ERR_INVALID_PARAM;
+    }
+
+    return rp2350_sdio_rx_start_internal(buffer, NULL, num_blocks, blocksize);
+}
+
+// Start transferring data from SD card to memory buffer with scatter gather support
+// Each block can be written to a different address specified in buffer_addrs array
+// buffer_addrs: array of pointers, one for each block. All must be aligned to word boundary
+// num_blocks: number of blocks to receive
+// blocksize: size of each block in bytes
+sdio_status_t rp2350_sdio_rx_start_scatter(uint8_t **buffer_addrs, uint32_t num_blocks, uint32_t blocksize = SDIO_BLOCK_SIZE)
+{
+    // Check parameters
+    if (buffer_addrs == NULL || num_blocks > SDIO_MAX_BLOCKS_PER_REQ)
+    {
+        return SDIO_ERR_INVALID_PARAM;
+    }
+
+    // All buffers must be aligned
+    for (uint32_t i = 0; i < num_blocks; i++)
+    {
+        if (((uint32_t)buffer_addrs[i] & 3) != 0)
+        {
+            return SDIO_ERR_INVALID_PARAM;
+        }
+    }
+
+    return rp2350_sdio_rx_start_internal(buffer_addrs[0], buffer_addrs, num_blocks, blocksize);
 }
 
 static void sdio_update_rx_blocks_done()
@@ -698,8 +741,20 @@ static void sdio_verify_rx_checksums()
         // Calculate checksum from received data
         int blockidx = g_sdio.blocks_checksumed++;
         uint32_t words_per_block = g_sdio.blocksize / 4;
-        uint64_t checksum = sdio_crc16_4bit_checksum(g_sdio.data_buf + blockidx * words_per_block,
-                                                     words_per_block);
+        
+        // If using scatter gather, get the address from the scatter_addrs array
+        // Otherwise use the contiguous buffer
+        uint32_t *block_addr;
+        if (g_sdio.scatter_addrs != NULL)
+        {
+            block_addr = (uint32_t*)g_sdio.scatter_addrs[blockidx];
+        }
+        else
+        {
+            block_addr = g_sdio.data_buf + blockidx * words_per_block;
+        }
+        
+        uint64_t checksum = sdio_crc16_4bit_checksum(block_addr, words_per_block);
 
         // Convert received checksum to little-endian format
         uint32_t top = __builtin_bswap32(g_sdio.received_checksums[blockidx].top);
@@ -751,15 +806,6 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
 
     if (g_sdio.transfer_state == SDIO_RX_DONE || g_sdio.transfer_state == SDIO_IDLE)
     {
-        /*
-        if (g_sdio.transfer_state == SDIO_IDLE) {
-            SDIO_ERRMSG("Cosmigroxkt", 0, 0);
-        }
-        */
-        if (blocks_complete)
-        {
-            *blocks_complete = g_sdio.total_blocks;
-        }
         return SDIO_OK;
     }
     else if (SDIO_ELAPSED_US(g_sdio.transfer_start_time) > SDIO_TRANSFER_TIMEOUT_US)

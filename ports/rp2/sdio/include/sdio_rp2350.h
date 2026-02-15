@@ -30,15 +30,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#if defined __has_include
-# if __has_include (<sdio_rp2350_config.h>)
-#  include <sdio_rp2350_config.h>
-#else
-#  include <sdio_rp2350_config_example.h>
-# endif
-#else
-# include <sdio_rp2350_config.h>
-#endif
+#include "sdio_rp2350_config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,7 +48,7 @@ typedef enum {
     SDIO_ERR_WRITE_FAIL = 8,       // Card reports write failure
     SDIO_ERR_STOP_TIMEOUT = 9,     // Timeout waiting for card to be idle
     SDIO_ERR_INVALID_PARAM = 10,   // Invalid parameters to function
-} sdio_status_t;
+}  sdio_status_t;
 
 // SDIO driver can optionally log debug, error and critical messages.
 // To enable this, edit sdio_rp2350_config.h
@@ -220,6 +212,13 @@ sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response,
 // Start transferring data from SD card to memory buffer
 // Memory buffer must be aligned to word boundary
 sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize);
+
+// Start transferring data from SD card to memory buffer with scatter gather support
+// Each block can be written to a different address specified in buffer_addrs array
+// buffer_addrs: array of pointers, one for each block. All must be aligned to word boundary
+// num_blocks: number of blocks to receive
+// blocksize: size of each block in bytes
+sdio_status_t rp2350_sdio_rx_start_scatter(uint8_t **buffer_addrs, uint32_t num_blocks, uint32_t blocksize);
 
 // Check if reception is complete
 // Returns SDIO_BUSY while transferring, SDIO_OK when done and error on failure.

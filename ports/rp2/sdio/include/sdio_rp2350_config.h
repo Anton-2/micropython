@@ -41,40 +41,10 @@ void sdio_free_resources(void);
 } /* extern "C" */
 #endif
 
-
-// void sdio_log(const char *txt, uint32_t arg1, uint32_t arg2);
-// #define SDIO_ERRMSG(txt, arg1, arg2) sdio_log(txt, arg1, arg2)
-// #define SDIO_DBGMSG(txt, arg1, arg2) sdio_log(txt, arg1, arg2)
-
-// Maximum number of blocks queued for transmission or reception
-// #define SDIO_MAX_BLOCKS_PER_REQ 128
-
 // Timeouts for operations, in microseconds
 // #define SDIO_CMD_TIMEOUT_US 2000
 // #define SDIO_TRANSFER_TIMEOUT_US (1000 * 1000)
 // #define SDIO_INIT_TIMEOUT_US (1000 * 1000)
-
-// Enable the definition of SdFat library SdioCard class
-// #define SDIO_USE_SDFAT 1
-
-// Prefetch buffer in SdioCard, bytes
-// Set to 0 to disable
-// #define SDIO_SDFAT_PREFETCH_BUFFER 2048
-
-// Number of retries for sector read/write
-// #define SDIO_MAX_RETRYCOUNT 1
-
-// When testing SDIO communication during init, which sector to read/write
-// #define SDIO_COMMUNICATION_TEST_SECTOR_IDX 0
-
-// Enable write check during initialization
-// This writes back the same data as was read from the SD card
-// #define SDIO_COMMUNICATION_TEST_DO_WRITE 1
-
-// Default speed to use for SDIO communication
-// If communication doesn't work, speed is automatically dropped
-// #define SDIO_DEFAULT_SPEED SDIO_HIGHSPEED
-
 
 // PIO block to use
 #define SDIO_PIO (g_sdio_resources.pio)
@@ -89,9 +59,9 @@ void sdio_free_resources(void);
 #define SDIO_DMACH_A (g_sdio_resources.dma_chan_a)
 #define SDIO_DMACH_B (g_sdio_resources.dma_chan_b)
 
-// DMA IRQ: fixed to 0
-#define SDIO_DMAIRQ_IDX 0
-#define SDIO_DMAIRQ DMA_IRQ_0
+// DMA IRQ: fixed to 1
+#define SDIO_DMAIRQ_IDX 1
+#define SDIO_DMAIRQ DMA_IRQ_1
 
 // PIO IOBASE: forced to 0 to support pins 0-31 only
 // (cannot be dynamic due to compile-time usage in external sdio_rp2350 files)

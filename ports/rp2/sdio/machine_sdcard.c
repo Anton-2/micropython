@@ -17,10 +17,13 @@
 #define SD_CMD_SET_BLOCKLEN         16
 #define SD_CMD_READ_SINGLE_BLOCK    17
 #define SD_CMD_READ_MULTIPLE_BLOCK  18
+#define SD_CMD_SET_BLOCK_COUNT      23
 #define SD_CMD_WRITE_BLOCK          24
 #define SD_CMD_WRITE_MULTIPLE_BLOCK 25
 #define SD_CMD_APP_CMD              55
 #define SD_ACMD_SEND_OP_COND        41
+#define SD_ACMD_GET_SCR             51
+
 #define SD_CMD_APP_SET_BUS_WIDTH    6
 
 #define SDCARD_BLOCK_SIZE 512
@@ -45,9 +48,9 @@ static int sdcard_init_card(machine_sdcard_obj_t *self) {
         return 0;
     }
 
-    // Allocate SDIO resources (PIO, SM, DMA channels)
+    // Find SDIO resources (PIO, SM, DMA channels)
     if (sdio_find_ressources(self->clk_pin, self->cmd_pin, self->d0_pin) != 0) {
-        return -MP_ENODEV; // Failed to allocate resources
+        return -MP_ENODEV; // Failed to find free resources, or invalid pins
     }
 
     uint32_t response;
@@ -165,7 +168,34 @@ static int sdcard_init_card(machine_sdcard_obj_t *self) {
         return -MP_EIO;
     }
 
+
+    // meu
+
+    status = rp2350_sdio_command_u32(SD_CMD_SET_BLOCKLEN, SDCARD_BLOCK_SIZE, &response, 0);
+    if (status != SDIO_OK) {
+        mp_raise_OSError(MP_EIO);
+    }
     self->block_len = SDCARD_BLOCK_SIZE;
+
+
+#if false
+    for (int i = 0; i < 8; i++) {
+        csd[i] = 0xff;
+    }
+
+    status = rp2350_sdio_command_u32(SD_CMD_APP_CMD, rca, &response, 0);
+    if (status != SDIO_OK) {
+        return -MP_EIO;
+    }
+
+    status = rp2350_sdio_command(SD_ACMD_GET_SCR, rca, csd, 8, SDIO_FLAG_NO_CRC | SDIO_FLAG_NO_CMD_TAG);
+    if (status != SDIO_OK) {
+        return -MP_EIO;
+    }
+    for (int i = 0; i < 8; i++) {
+        mp_printf(&mp_plat_print, "SCR[%d]: %02x\n", i, csd[i]);
+    }
+#endif
 
     // Switch to requested speed mode
     timing = rp2350_sdio_get_timing(self->timing_mode);
@@ -202,6 +232,7 @@ static mp_obj_t machine_sdcard_readblocks(mp_obj_t self_in, mp_obj_t block_num_i
 
     if (num_blocks == 1) {
         // Single block read
+
         status = rp2350_sdio_command_u32(SD_CMD_SET_BLOCKLEN, SDCARD_BLOCK_SIZE, &response, 0);
         if (status != SDIO_OK) {
             mp_raise_OSError(MP_EIO);
@@ -212,43 +243,33 @@ static mp_obj_t machine_sdcard_readblocks(mp_obj_t self_in, mp_obj_t block_num_i
             mp_raise_OSError(MP_EIO);
         }
 
-        status = rp2350_sdio_rx_start(bufinfo.buf, 1, SDCARD_BLOCK_SIZE);
-        if (status != SDIO_OK) {
-            mp_raise_OSError(MP_EIO);
-        }
-
-        while ((status = rp2350_sdio_rx_poll(NULL)) == SDIO_BUSY) {
-            mp_event_handle_nowait();
-        }
-
-        rp2350_sdio_stop();
-
-        if (status != SDIO_OK) {
-            mp_raise_OSError(MP_EIO);
-        }
     } else {
+
+        status = rp2350_sdio_command_u32(SD_CMD_SET_BLOCK_COUNT, num_blocks, &response, 0);
+        if (status != SDIO_OK) {
+            mp_raise_OSError(MP_EIO);
+        }
+
         // Multiple block read
         status = rp2350_sdio_command_u32(SD_CMD_READ_MULTIPLE_BLOCK, address, &response, SDIO_FLAG_STOP_CLK);
         if (status != SDIO_OK) {
             mp_raise_OSError(MP_EIO);
         }
+    }
 
-        status = rp2350_sdio_rx_start(bufinfo.buf, num_blocks, SDCARD_BLOCK_SIZE);
-        if (status != SDIO_OK) {
-            mp_raise_OSError(MP_EIO);
-        }
+    status = rp2350_sdio_rx_start(bufinfo.buf, num_blocks, SDCARD_BLOCK_SIZE);
+    if (status != SDIO_OK) {
+        mp_raise_OSError(MP_EIO);
+    }
 
-        while ((status = rp2350_sdio_rx_poll(NULL)) == SDIO_BUSY) {
-            mp_event_handle_nowait();
-        }
+    while ((status = rp2350_sdio_rx_poll(NULL)) == SDIO_BUSY) {
+        mp_event_handle_nowait();
+    }
 
-        // Send stop transmission command
-        rp2350_sdio_command_u32(SD_CMD_STOP_TRANSMISSION, 0, &response, 0);
-        rp2350_sdio_stop();
+    rp2350_sdio_stop();
 
-        if (status != SDIO_OK) {
-            mp_raise_OSError(MP_EIO);
-        }
+    if (status != SDIO_OK) {
+        mp_raise_OSError(MP_EIO);
     }
 
     return mp_const_none;
@@ -409,3 +430,66 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, sdcard_obj_make_new,
     locals_dict, &sdcard_locals_dict
     );
+
+    /*
+    STANDARD
+
+    VFS
+      512: 408808.0 us,  1.8 Mb/s
+     1024: 243156.0 us,  3.1 Mb/s
+     2048: 153876.0 us,  4.9 Mb/s
+     4096: 107958.0 us,  7.0 Mb/s
+     8192:  85350.0 us,  8.8 Mb/s
+    16384:  74024.0 us, 10.2 Mb/s
+    32768:  68338.0 us, 11.0 Mb/s
+
+    Direct
+      512: 394005.0 us,  1.9 Mb/s
+     1024: 234037.0 us,  3.2 Mb/s
+     2048: 147969.0 us,  5.1 Mb/s
+     4096: 104627.0 us,  7.2 Mb/s
+     8192:  82692.0 us,  9.0 Mb/s
+    16384:  71210.0 us, 10.4 Mb/s
+    32768:  64424.0 us, 11.2 Mb/s
+
+    Random
+      512: 417359.0 us,  1.8 Mb/s
+     1024: 246799.0 us,  3.0 Mb/s
+     2048: 154531.0 us,  4.9 Mb/s
+     4096: 107923.0 us,  6.9 Mb/s
+     8192:  84734.0 us,  8.8 Mb/s
+    16384:  72275.0 us, 10.2 Mb/s
+    32768:  65195.0 us, 11.1 Mb/s
+
+
+
+     OVERCLOCK
+    VFS
+      512: 368524.0 us,  2.0 Mb/s
+     1024: 202175.0 us,  3.7 Mb/s
+     2048: 117658.0 us,  6.4 Mb/s
+     4096:  68969.0 us, 10.9 Mb/s
+     8192:  45092.0 us, 16.7 Mb/s
+    16384:  35079.0 us, 21.4 Mb/s
+    32768:  29119.0 us, 25.8 Mb/s
+
+    Direct
+      512: 350634.0 us,  2.1 Mb/s
+     1024: 193017.0 us,  3.9 Mb/s
+     2048: 106989.0 us,  7.0 Mb/s
+     4096:  63742.0 us, 11.8 Mb/s
+     8192:  43527.0 us, 17.1 Mb/s
+    16384:  32674.0 us, 22.6 Mb/s
+    32768:  26955.0 us, 26.7 Mb/s
+
+    Random
+      512: 377686.0 us,  2.0 Mb/s
+     1024: 211777.0 us,  3.5 Mb/s
+     2048: 119050.0 us,  6.3 Mb/s
+     4096:  70381.0 us, 10.7 Mb/s
+     8192:  46151.0 us, 16.2 Mb/s
+    16384:  33292.0 us, 22.1 Mb/s
+    32768:  26679.0 us, 27.0 Mb/s
+
+
+     */
