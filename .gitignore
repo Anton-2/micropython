@@ -34,3 +34,5 @@ user.props
 /xtensa-lx106-elf/
 **/.cache
 *.o
+ports/rp2/fw
+ports/rp2/sdio/salva

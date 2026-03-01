@@ -86,3 +86,8 @@ exclude = [
   "tests/micropython/test_normalize_newlines.py",
   "tests/micropython/viper_args.py",
 ]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+]

@@ -7,16 +7,25 @@
 
 
 //Number of bits to index ring buffer
-#define RING_BITS 12                              //   12
-#define RING_BYTES (1<<RING_BITS)                 // 4096 bytes ring buffer
-#define RING_SIZE  (RING_BYTES/SDIO_BLOCK_SIZE)   //    8 sectors in ring
+#define RING_BITS    12                              //   12   13
+#define RING_BYTES   (1<<RING_BITS)                 // 4096 8192 bytes ring buffer
+#define RING_SAMPLES (RING_BYTES/sizeof(int16_t))   // 2048 4096 samples in ring
+#define RING_SIZE    (RING_BYTES/SDIO_BLOCK_SIZE)   //    8   16 sectors in ring
+#define SECTOR_SAMPLES (SDIO_BLOCK_SIZE/2)          // samples per sector (int16)
 
-// amplitude (?), sample accumulator
-typedef int32_t Q16_15_t;
+#define SAMPLE_BYTES  sizeof(int16_t)               // bytes per sample
+#define samples_to_bytes(n)  ((n) * SAMPLE_BYTES)
+#define bytes_to_samples(n)  ((n) / SAMPLE_BYTES)
+
+// amplitude (?)
+typedef int16_t Q1_14_t;        // -2.0 ...1.99994
+
+// sample accumulator
+typedef int32_t Q17_14_t;
 
 
 // pitch
-typedef uint32_t UQ15_17_t;     // 0..32767
+typedef uint32_t UQ15_17_t;     // 0.0 ... 32767.999992
 
 
 // omega
@@ -44,6 +53,9 @@ typedef struct Sample {
 #define VOICE_CANCEL            4
 
 
+// Number of samples in loop cache (half the ring buffer)
+#define LOOP_CACHE_SAMPLES (RING_BYTES / 4)  // RING_BYTES/2 bytes = RING_BYTES/4 int16_t samples
+
 // Voice structure
 typedef struct {
     // SD card position
@@ -57,9 +69,17 @@ typedef struct {
     uint32_t bytes_consumed;        // Total number of bytes consumed by reader
 
     // Voice
-    sample_t * sample;
     omega_t omega_inc;              // phase increment § OMEGA_BITS.FRAC_BITS
     omega_t omega;                  // phase position
+
+    // Loop points (in samples, 0 = no loop)
+    uint32_t loop_start_sample;     // Sample index of loop start (absolute, from beginning of sample data)
+    uint32_t loop_end_sample;       // Sample index of loop end (first sample past the loop), 0 = no loop
+
+    // Loop cache: stores up to LOOP_CACHE_SAMPLES samples from the sector-aligned boundary
+    // before loop_start_sample. Filled once when playback first reaches loop_start_sample.
+    int16_t loop_cache[LOOP_CACHE_SAMPLES];
+    uint32_t loop_cache_samples;    // actual number of samples stored in loop_cache (0 = not yet filled)
 
     uint32_t state:3;
 
@@ -71,17 +91,23 @@ typedef struct {
 // Voice manager structure
 typedef struct {
     sdio_voice_t *voices;                            // Dynamically allocated array of voices
+    Q1_14_t *amplitude_buffer;                       // Amplitude envelope buffer (chunk_size samples)
+    Q17_14_t *accumulator_buffer;                    // Sample accumulator buffer for mixing (chunk_size samples)
     uint32_t num_voices;                             // Number of active voices
+    uint32_t chunk_size;                             // Size of buffers (in samples)
     int active_voice_idx;                            // Index of voice with active transfer (-1 if none)
+    int free_voice_idx;                              // Index of a free voice (-1 if none)
     uint32_t transfer_num_blocks;                    // Number of blocks in current transfer
     uint32_t transfer_blocks_completed;              // Number of blocks already processed from current transfer
 } sdio_voice_manager_t;
 
 // Initialize voice manager
 // num_voices: number of voices to allocate
+// chunk_size: size of the accumulator buffer (in samples)
 // Allocates voices dynamically but does not configure them yet
 sdio_status_t sdio_voice_manager_init(sdio_voice_manager_t *manager,
-                                      uint32_t num_voices);
+                                      uint32_t num_voices,
+                                      uint32_t chunk_size);
 
 // Free voice manager resources
 void sdio_voice_manager_free(sdio_voice_manager_t *manager);
@@ -102,11 +128,17 @@ static inline sdio_voice_t *sdio_voice_manager_get(sdio_voice_manager_t *manager
 // Can be called on an already used voice to restart it
 // sd_sector: first sector to read
 // size_bytes: total size in bytes to read (sectors beyond this are filled with zeros)
+// loop_start_sample: sample index where the loop begins (0 if no loop)
+// loop_end_sample: sample index of first sample past the loop (0 = no loop)
 // Returns SDIO_ERR_INVALID_PARAM if a transfer is in progress on this voice
 sdio_status_t sdio_voice_start(sdio_voice_manager_t *manager,
                                 uint32_t voice_index,
                                 uint32_t sd_sector,
-                                uint32_t size_bytes);
+                                uint32_t size_bytes,
+                                omega_t omega_inc,
+                                uint32_t start_offset,
+                                uint32_t loop_start_sample,
+                                uint32_t loop_end_sample);
 
 // Update all voices (should be called regularly)
 // Checks if current transfer is complete and starts next transfer on the least filled voice
@@ -127,3 +159,10 @@ void sdio_voice_print_diag(const sdio_voice_t *voice, const char *label);
 
 // Print diagnostic information about the manager (for debugging)
 void sdio_voice_manager_print_diag(const sdio_voice_manager_t *manager, const char *label);
+
+// Fill chunk: mix all active voices into the accumulator buffer
+uint32_t sdio_voice_fill_chunk(sdio_voice_manager_t *manager);
+
+// Fill amplitude buffer with a constant value
+// amplitude: Q1_14_t value to fill the buffer with
+void sdio_voice_fill_amplitude(sdio_voice_manager_t *manager, Q1_14_t amplitude);
