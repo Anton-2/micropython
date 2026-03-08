@@ -176,3 +176,11 @@ void sdio_voice_fill_amplitude(sdio_voice_manager_t *manager, Q1_14_t amplitude)
 // Attach or detach an ADSR envelope to a voice (NULL to detach)
 // When attached, fill_chunk generates the amplitude from the ADSR instead of amplitude_buffer
 void sdio_voice_set_adsr(sdio_voice_t *voice, adsr_t *adsr);
+
+// Return index of a free voice, or -1 if none available
+// (updated by sdio_voice_fill_chunk)
+static inline int sdio_voice_manager_free_idx(const sdio_voice_manager_t *manager)
+{
+    if (manager == NULL) return -1;
+    return manager->free_voice_idx;
+}

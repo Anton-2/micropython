@@ -256,6 +256,21 @@ static mp_obj_t voice_get_accum(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(voice_get_accum_obj, voice_get_accum);
 
+// free_voice() -> int | None
+// Returns index of a free voice, or None if all voices are busy
+static mp_obj_t voice_free_voice(void) {
+    if (!g_manager_initialized) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("manager not initialized"));
+    }
+
+    int idx = sdio_voice_manager_free_idx(&g_voice_manager);
+    if (idx < 0) {
+        return mp_const_none;
+    }
+    return MP_OBJ_NEW_SMALL_INT(idx);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(voice_free_voice_obj, voice_free_voice);
+
 /* ================================================================== */
 /* ADSR MicroPython type                                               */
 /* ================================================================== */
@@ -369,6 +384,7 @@ static const mp_rom_map_elem_t voice_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_fill_amp), MP_ROM_PTR(&voice_fill_amp_obj) },
     { MP_ROM_QSTR(MP_QSTR_fill_chunk), MP_ROM_PTR(&voice_fill_chunk_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_accum), MP_ROM_PTR(&voice_get_accum_obj) },
+    { MP_ROM_QSTR(MP_QSTR_free_voice), MP_ROM_PTR(&voice_free_voice_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_adsr), MP_ROM_PTR(&voice_set_adsr_obj) },
 
     // ADSR type
