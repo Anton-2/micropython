@@ -1,6 +1,6 @@
 // MicroPython wrapper for SDIO voice manager
-#include "py/runtime.h"
-#include "py/mphal.h"
+#include <py/runtime.h>
+#include "py/obj.h"
 #include "py/mperrno.h"
 #include "sdio_voice.h"
 
@@ -49,7 +49,7 @@ static mp_obj_t voice_free(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(voice_free_obj, voice_free);
 
-// start(voice_index, sd_sector, size_bytes, omega_inc, start_offset, loop_start_sample=0, loop_end_sample=0)
+// start(voice_index, sd_sector, size_samples, omega_inc, start_sample, loop_start_sample=0, loop_end_sample=0)
 static mp_obj_t voice_start(size_t n_args, const mp_obj_t *args) {
     if (!g_manager_initialized) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("manager not initialized"));
@@ -57,9 +57,9 @@ static mp_obj_t voice_start(size_t n_args, const mp_obj_t *args) {
 
     mp_int_t voice_index = mp_obj_get_int(args[0]);
     mp_int_t sd_sector = mp_obj_get_int(args[1]);
-    mp_int_t size_bytes = mp_obj_get_int(args[2]);
+    mp_int_t size_samples = mp_obj_get_int(args[2]);
     omega_t omega_inc = (omega_t)(mp_obj_get_float(args[3]) * ONE_OMEGA);
-    mp_uint_t start_offset = mp_obj_get_int(args[4]);
+    mp_uint_t start_sample = mp_obj_get_int(args[4]);
     uint32_t loop_start_sample = (n_args > 5) ? (uint32_t)mp_obj_get_int(args[5]) : 0;
     uint32_t loop_end_sample   = (n_args > 6) ? (uint32_t)mp_obj_get_int(args[6]) : 0;
 
@@ -67,11 +67,11 @@ static mp_obj_t voice_start(size_t n_args, const mp_obj_t *args) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid voice_index"));
     }
 
-    if (size_bytes <= 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("size_bytes must be > 0"));
+    if (size_samples <= 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("size_samples must be > 0"));
     }
 
-    sdio_status_t status = sdio_voice_start(&g_voice_manager, voice_index, sd_sector, size_bytes, omega_inc, start_offset, loop_start_sample, loop_end_sample);
+    sdio_status_t status = sdio_voice_start(&g_voice_manager, voice_index, sd_sector, size_samples, omega_inc, start_sample, loop_start_sample, loop_end_sample);
     if (status != SDIO_OK) {
         mp_raise_OSError(MP_EIO);
     }
@@ -93,7 +93,7 @@ static mp_obj_t voice_update(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(voice_update_obj, voice_update);
 
-// available(voice_index) -> bytes available
+// available(voice_index) -> samples available
 static mp_obj_t voice_available(mp_obj_t voice_index_in) {
     if (!g_manager_initialized) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("manager not initialized"));
@@ -110,26 +110,26 @@ static mp_obj_t voice_available(mp_obj_t voice_index_in) {
         mp_raise_OSError(MP_EIO);
     }
 
-    uint32_t available = sdio_voice_available(voice);
+    uint32_t available = voice->sd_samples_read - voice->samples_consumed;
     return MP_OBJ_NEW_SMALL_INT(available);
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(voice_available_obj, voice_available);
 
-// consume(voice_index, bytes_read)
-static mp_obj_t voice_consume(mp_obj_t voice_index_in, mp_obj_t bytes_read_in) {
+// consume(voice_index, samples_read)
+static mp_obj_t voice_consume(mp_obj_t voice_index_in, mp_obj_t samples_read_in) {
     if (!g_manager_initialized) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("manager not initialized"));
     }
 
     mp_int_t voice_index = mp_obj_get_int(voice_index_in);
-    mp_int_t bytes_read = mp_obj_get_int(bytes_read_in);
+    mp_int_t samples_read = mp_obj_get_int(samples_read_in);
 
     if (voice_index < 0 || voice_index >= (mp_int_t)g_voice_manager.num_voices) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid voice_index"));
     }
 
-    if (bytes_read < 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("bytes_read must be >= 0"));
+    if (samples_read < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("samples_read must be >= 0"));
     }
 
     sdio_voice_t *voice = sdio_voice_manager_get(&g_voice_manager, voice_index);
@@ -137,7 +137,7 @@ static mp_obj_t voice_consume(mp_obj_t voice_index_in, mp_obj_t bytes_read_in) {
         mp_raise_OSError(MP_EIO);
     }
 
-    sdio_voice_consume(voice, bytes_read);
+    sdio_voice_consume(voice, samples_read);
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(voice_consume_obj, voice_consume);
@@ -256,6 +256,104 @@ static mp_obj_t voice_get_accum(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(voice_get_accum_obj, voice_get_accum);
 
+/* ================================================================== */
+/* ADSR MicroPython type                                               */
+/* ================================================================== */
+
+typedef struct {
+    mp_obj_base_t base;
+    adsr_t adsr;
+} mp_obj_adsr_t;
+
+// ADSR()
+static mp_obj_t adsr_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+    mp_arg_check_num(n_args, n_kw, 0, 0, false);
+    mp_obj_adsr_t *self = mp_obj_malloc(mp_obj_adsr_t, type);
+    adsr_init(&self->adsr);
+    adsr_tables_init();
+    return MP_OBJ_FROM_PTR(self);
+}
+
+// adsr.note_on(attack, decay, sustain, release, attack_shape=LINEAR, decay_shape=LINEAR, release_shape=LINEAR)
+static mp_obj_t mp_adsr_note_on(size_t n_args, const mp_obj_t *args) {
+    mp_obj_adsr_t *self = MP_OBJ_TO_PTR(args[0]);
+    self->adsr.attack_samples  = (uint32_t)mp_obj_get_int(args[1]);
+    self->adsr.decay_samples   = (uint32_t)mp_obj_get_int(args[2]);
+    mp_float_t sustain = mp_obj_get_float(args[3]);
+    if (sustain < 0.0f) sustain = 0.0f;
+    if (sustain > 1.0f) sustain = 1.0f;
+    self->adsr.sustain_level   = (q16_t)(sustain * 0xFFFF);
+    self->adsr.release_samples = (uint32_t)mp_obj_get_int(args[4]);
+    self->adsr.attack_shape    = (n_args > 5) ? (adsr_shape_t)mp_obj_get_int(args[5]) : ADSR_SHAPE_LINEAR;
+    self->adsr.decay_shape     = (n_args > 6) ? (adsr_shape_t)mp_obj_get_int(args[6]) : ADSR_SHAPE_LINEAR;
+    self->adsr.release_shape   = (n_args > 7) ? (adsr_shape_t)mp_obj_get_int(args[7]) : ADSR_SHAPE_LINEAR;
+    adsr_note_on(&self->adsr);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(adsr_note_on_obj, 5, 8, mp_adsr_note_on);
+
+// adsr.note_off()  — uses last_amp stored in adsr_t as release start
+static mp_obj_t mp_adsr_note_off(mp_obj_t self_in) {
+    mp_obj_adsr_t *self = MP_OBJ_TO_PTR(self_in);
+    adsr_note_off(&self->adsr);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(adsr_note_off_obj, mp_adsr_note_off);
+
+// adsr.state() -> int  (0=IDLE, 1=ATTACK, 2=DECAY, 3=SUSTAIN, 4=RELEASE)
+static mp_obj_t adsr_state(mp_obj_t self_in) {
+    mp_obj_adsr_t *self = MP_OBJ_TO_PTR(self_in);
+    return MP_OBJ_NEW_SMALL_INT(self->adsr.state);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(adsr_state_obj, adsr_state);
+
+static const mp_rom_map_elem_t adsr_locals_dict_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_note_on),  MP_ROM_PTR(&adsr_note_on_obj) },
+    { MP_ROM_QSTR(MP_QSTR_note_off), MP_ROM_PTR(&adsr_note_off_obj) },
+    { MP_ROM_QSTR(MP_QSTR_state),    MP_ROM_PTR(&adsr_state_obj) },
+    // Shape constants
+    { MP_ROM_QSTR(MP_QSTR_LINEAR),   MP_ROM_INT(ADSR_SHAPE_LINEAR) },
+    { MP_ROM_QSTR(MP_QSTR_EXP),      MP_ROM_INT(ADSR_SHAPE_EXP) },
+};
+static MP_DEFINE_CONST_DICT(adsr_locals_dict, adsr_locals_dict_table);
+
+static MP_DEFINE_CONST_OBJ_TYPE(
+    mp_type_adsr,
+    MP_QSTR_ADSR,
+    MP_TYPE_FLAG_NONE,
+    make_new, adsr_make_new,
+    locals_dict, &adsr_locals_dict
+);
+
+// set_adsr(voice_index, adsr_obj_or_None)
+static mp_obj_t voice_set_adsr(mp_obj_t voice_index_in, mp_obj_t adsr_in) {
+    if (!g_manager_initialized) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("manager not initialized"));
+    }
+
+    mp_int_t voice_index = mp_obj_get_int(voice_index_in);
+    if (voice_index < 0 || voice_index >= (mp_int_t)g_voice_manager.num_voices) {
+        mp_raise_ValueError(MP_ERROR_TEXT("invalid voice_index"));
+    }
+
+    sdio_voice_t *voice = sdio_voice_manager_get(&g_voice_manager, voice_index);
+    if (voice == NULL) {
+        mp_raise_OSError(MP_EIO);
+    }
+
+    if (adsr_in == mp_const_none) {
+        sdio_voice_set_adsr(voice, NULL);
+    } else {
+        if (!mp_obj_is_type(adsr_in, &mp_type_adsr)) {
+            mp_raise_TypeError(MP_ERROR_TEXT("expected ADSR object or None"));
+        }
+        mp_obj_adsr_t *adsr_obj = MP_OBJ_TO_PTR(adsr_in);
+        sdio_voice_set_adsr(voice, &adsr_obj->adsr);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(voice_set_adsr_obj, voice_set_adsr);
+
 // Module globals
 static const mp_rom_map_elem_t voice_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_voice) },
@@ -271,6 +369,17 @@ static const mp_rom_map_elem_t voice_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_fill_amp), MP_ROM_PTR(&voice_fill_amp_obj) },
     { MP_ROM_QSTR(MP_QSTR_fill_chunk), MP_ROM_PTR(&voice_fill_chunk_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_accum), MP_ROM_PTR(&voice_get_accum_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_adsr), MP_ROM_PTR(&voice_set_adsr_obj) },
+
+    // ADSR type
+    { MP_ROM_QSTR(MP_QSTR_ADSR), MP_ROM_PTR(&mp_type_adsr) },
+
+    // ADSR state constants
+    { MP_ROM_QSTR(MP_QSTR_ADSR_IDLE),    MP_ROM_INT(ADSR_IDLE) },
+    { MP_ROM_QSTR(MP_QSTR_ADSR_ATTACK),  MP_ROM_INT(ADSR_ATTACK) },
+    { MP_ROM_QSTR(MP_QSTR_ADSR_DECAY),   MP_ROM_INT(ADSR_DECAY) },
+    { MP_ROM_QSTR(MP_QSTR_ADSR_SUSTAIN), MP_ROM_INT(ADSR_SUSTAIN) },
+    { MP_ROM_QSTR(MP_QSTR_ADSR_RELEASE), MP_ROM_INT(ADSR_RELEASE) },
 
     // Status constants
     { MP_ROM_QSTR(MP_QSTR_SDIO_OK), MP_ROM_INT(SDIO_OK) },

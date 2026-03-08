@@ -1,8 +1,8 @@
-#include "sdio_voice.h"
+#pragma GCC optimize("O3,unroll-loops")
+
 #include <stdint.h>
-#include <string.h>
-#include "py/mphal.h"
 #include "py/runtime.h"
+#include "sdio_voice.h"
 
 // SD Card command definitions
 #define SD_CMD_SET_BLOCKLEN         16
@@ -15,30 +15,83 @@
 // Forward declaration
 static _Bool _voice_fill_bloc(sdio_voice_t *voice, const Q1_14_t *amp, Q17_14_t *dest, uint32_t count);
 
+#if DEBUG
+static void info(sdio_voice_t *voice) {
+
+    uint32_t pos = voice->omega>>OMEGA_SHIFT;
+
+    uint32_t pos_ring_idx = pos / SECTOR_SAMPLES;
+    uint32_t pos_ring_of7 = pos % SECTOR_SAMPLES;
+
+    uint32_t ring_idx = voice->samples_consumed / SECTOR_SAMPLES;
+    uint32_t ring_of7 = voice->samples_consumed % SECTOR_SAMPLES;
+
+    mp_printf(&mp_plat_print, "R: samples_consumed %u(%u+%u) pos %u(%u+%u)\n", voice->samples_consumed, ring_idx, ring_of7, pos, pos_ring_idx, pos_ring_of7);
+
+    ring_idx = voice->sd_samples_read / SECTOR_SAMPLES;
+    ring_of7 = voice->sd_samples_read % SECTOR_SAMPLES;
+
+    mp_printf(&mp_plat_print, "SD: read %u(%u+%u) sector %u\n", voice->sd_samples_read, ring_idx, ring_of7, voice->sd_start_sector + voice->sd_samples_read/SECTOR_SAMPLES );
+    mp_printf(&mp_plat_print, "SD: write sidx %u, %u filled\n", voice->write_sector_idx, voice->sectors_filled);
+
+}
+#endif
+
 // Helper: linearise `count` samples from voice->buffer[src % RING_SAMPLES..] into a flat buffer.
 static inline void ring_read(const int16_t *ring, uint32_t src, int16_t *out, uint32_t count) {
+    #if DEBUG
+    mp_printf(&mp_plat_print, "    Ring READ %u__%u_>%u\n", src, count, src+count);
+    #endif
     src %= RING_SAMPLES;
     uint32_t first = RING_SAMPLES - src;
     if (first > count) first = count;
     memcpy(out,         ring + src, first * sizeof(int16_t));
-    if (first < count) memcpy(out + first, ring, (count - first) * sizeof(int16_t));
+    #if DEBUG
+    mp_printf(&mp_plat_print, "      CPY [%u..%u[ (%u) at %u\n", src, src+first, first, 0);
+    #endif
+    if (first < count) {
+        memcpy(out + first, ring, (count - first) * sizeof(int16_t));
+        #if DEBUG
+        mp_printf(&mp_plat_print, "      CPY [%u..%u[ (%u) at %u\n", 0, count-first, count-first, first);
+        #endif
+
+    }
 }
 
 // Helper: write `count` samples from flat buffer into voice->buffer[dst % RING_SAMPLES..].
 static inline void ring_write(int16_t *ring, uint32_t dst, const int16_t *in, uint32_t count) {
+    #if DEBUG
+    mp_printf(&mp_plat_print, "    Ring WRITE %u__%u_>%u\n", dst, count, dst+count);
+    #endif
     dst %= RING_SAMPLES;
     uint32_t first = RING_SAMPLES - dst;
     if (first > count) first = count;
     memcpy(ring + dst, in,         first * sizeof(int16_t));
-    if (first < count) memcpy(ring, in + first, (count - first) * sizeof(int16_t));
+    #if DEBUG
+    mp_printf(&mp_plat_print, "      CPY [%u..%u[ (%u) at %u\n", 0, 0+first, first, dst);
+    #endif
+    if (first < count) {
+        memcpy(ring, in + first, (count - first) * sizeof(int16_t));
+        #if DEBUG
+        mp_printf(&mp_plat_print, "      CPY [%u..%u[ (%u) at %u\n", first, count, count-first, 0);
+        #endif
+    }
 }
 
 static inline void ring_copy(int16_t *ring, uint32_t dst, uint32_t src, uint32_t count) {
     if (count == 0 || dst == src) return;
 
-    uint32_t dist_src_to_dst =(dst - src + RING_SAMPLES) % RING_SAMPLES;
-    int forward = (dist_src_to_dst >= count);
-    uint32_t remaining = count;
+    src %= RING_SAMPLES;
+    dst %= RING_SAMPLES;
+
+
+    int32_t dist_src_to_dst =(dst - src + RING_SAMPLES) % RING_SAMPLES;
+    int32_t forward = (dist_src_to_dst >= count);
+    int32_t remaining = count;
+
+    #if DEBUG
+    mp_printf(&mp_plat_print, "    Ring Copy %u samples from %u to %u\n", count, src, dst);
+    #endif
 
     if (forward) {
         uint32_t d = dst, s = src;
@@ -46,7 +99,10 @@ static inline void ring_copy(int16_t *ring, uint32_t dst, uint32_t src, uint32_t
             uint32_t chunk = remaining;
             if (s + chunk > RING_SAMPLES) chunk = RING_SAMPLES - s;
             if (d + chunk > RING_SAMPLES) chunk = RING_SAMPLES - d;
-            memcpy(ring + d, ring + s, chunk);
+            #if DEBUG
+            mp_printf(&mp_plat_print, "      FW (cpy) %u samples from %u to %u\n", chunk, s, d);
+            #endif
+            memcpy(ring + d, ring + s, chunk * sizeof(int16_t));
             s = (s + chunk) % RING_SAMPLES;
             d = (d + chunk) % RING_SAMPLES;
             remaining -= chunk;
@@ -62,7 +118,10 @@ static inline void ring_copy(int16_t *ring, uint32_t dst, uint32_t src, uint32_t
             if (chunk > d) chunk = d;
             if (chunk > s) chunk = s;
             d -= chunk; s -= chunk;
-            memmove(ring + d, ring + s, chunk);
+            #if DEBUG
+            memmove(ring + d, ring + s, chunk * sizeof(int16_t));
+            #endif
+            mp_printf(&mp_plat_print, "      BW (mov) %u bytes from %u to %u)\n", count, s, d);
             remaining -= chunk;
         }
     }
@@ -83,6 +142,8 @@ sdio_status_t sdio_voice_manager_init(sdio_voice_manager_t *manager,
     {
         return SDIO_ERR_INVALID_PARAM;
     }
+
+    adsr_tables_init();
 
     // Initialize all pointers to NULL for safe cleanup
     manager->voices = NULL;
@@ -126,13 +187,13 @@ sdio_status_t sdio_voice_manager_init(sdio_voice_manager_t *manager,
 sdio_status_t sdio_voice_start(sdio_voice_manager_t *manager,
                                       uint32_t voice_index,
                                       uint32_t sd_sector,
-                                      uint32_t size_bytes,
+                                      uint32_t size_samples,
                                       omega_t omega_inc,
-                                      uint32_t start_offset,
+                                      uint32_t start_sample,
                                       uint32_t loop_start_sample,
                                       uint32_t loop_end_sample)
 {
-    if (manager == NULL || voice_index >= manager->num_voices || size_bytes == 0)
+    if (manager == NULL || voice_index >= manager->num_voices || size_samples == 0)
     {
         return SDIO_ERR_INVALID_PARAM;
     }
@@ -146,14 +207,14 @@ sdio_status_t sdio_voice_start(sdio_voice_manager_t *manager,
     sdio_voice_t *voice = sdio_voice_manager_get(manager, voice_index);
 
     // Configure/reconfigure the voice
-    voice->sd_current_sector = sd_sector;
-    voice->sd_size_bytes = size_bytes;
-    voice->sd_bytes_read = 0;
+    voice->sd_start_sector = sd_sector;
+    voice->sd_size_samples = size_samples;
+    voice->sd_samples_read = 0;
     voice->write_sector_idx = 0;
     voice->sectors_filled = 0;
-    voice->bytes_consumed = start_offset;
+    voice->samples_consumed = start_sample;
     voice->omega_inc = omega_inc;
-    voice->omega = bytes_to_samples(start_offset) << OMEGA_SHIFT;
+    voice->omega = start_sample << OMEGA_SHIFT;
     voice->loop_start_sample = loop_start_sample;
     voice->loop_end_sample = loop_end_sample;
     voice->loop_cache_samples = 0;
@@ -223,15 +284,15 @@ static sdio_status_t sdio_voice_start_transfer(sdio_voice_t *voice, uint32_t *bl
         return SDIO_OK; // Buffer is full
     }
 
-    // Check how many bytes remain to read
-    if (voice->sd_bytes_read >= voice->sd_size_bytes)
+    // Check how many samples remain to read
+    if (voice->sd_samples_read >= voice->sd_size_samples)
     {
         return SDIO_OK; // Reached end of data
     }
-    uint32_t bytes_remaining = voice->sd_size_bytes - voice->sd_bytes_read;
+    uint32_t samples_remaining = voice->sd_size_samples - voice->sd_samples_read;
 
     // Calculate how many sectors contain real data to read
-    uint32_t sectors_with_data = (bytes_remaining + SDIO_BLOCK_SIZE - 1) / SDIO_BLOCK_SIZE;
+    uint32_t sectors_with_data = (samples_remaining + SECTOR_SAMPLES - 1) / SECTOR_SAMPLES;
 
     // Limit to free sectors available
     uint32_t sectors_to_transfer = free_sectors;
@@ -241,7 +302,7 @@ static sdio_status_t sdio_voice_start_transfer(sdio_voice_t *voice, uint32_t *bl
     }
 
     #if DEBUG
-    mp_printf(&mp_plat_print, "START TX: sd_size_bytes=%u sd_bytes_read=%u free_sectors=%u bytes_remaining=%u sectors_with_data=%u sectors_to_transfer=%u\n", voice->sd_size_bytes, voice->sd_bytes_read, free_sectors, bytes_remaining, sectors_with_data, sectors_to_transfer);
+    mp_printf(&mp_plat_print, "START TX: sd_size_samples=%u sd_samples_read=%u free_sectors=%u samples_remaining=%u sectors_with_data=%u sectors_to_transfer=%u\n", voice->sd_size_samples, voice->sd_samples_read, free_sectors, samples_remaining, sectors_with_data, sectors_to_transfer);
     #endif
 
     // Limit to maximum blocks per request
@@ -262,7 +323,7 @@ static sdio_status_t sdio_voice_start_transfer(sdio_voice_t *voice, uint32_t *bl
     }
 
     // Send READ_MULTIPLE_BLOCK command
-    status = rp2350_sdio_command_u32(SD_CMD_READ_MULTIPLE_BLOCK, voice->sd_current_sector, &response, SDIO_FLAG_STOP_CLK);
+    status = rp2350_sdio_command_u32(SD_CMD_READ_MULTIPLE_BLOCK, voice->sd_start_sector + voice->sd_samples_read/SECTOR_SAMPLES, &response, SDIO_FLAG_STOP_CLK);
     if (status != SDIO_OK)
     {
         return status;
@@ -295,10 +356,6 @@ sdio_status_t sdio_voice_manager_update(sdio_voice_manager_t *manager)
         return SDIO_ERR_INVALID_PARAM;
     }
 
-    #if DEBUG
-    mp_printf(&mp_plat_print, "Update\n");
-    #endif
-
     if (manager->active_voice_idx >= 0)
     {
         // Transfer in progress, check status
@@ -314,31 +371,26 @@ sdio_status_t sdio_voice_manager_update(sdio_voice_manager_t *manager)
 
         sdio_status_t status = rp2350_sdio_rx_poll(&blocks_complete);
 
+        /*
         #if DEBUG
         mp_printf(&mp_plat_print, "TX on %u, status=%u, ret complete=%u current transfer_blocks_completed=%u\n", manager->active_voice_idx, status, blocks_complete, manager->transfer_blocks_completed);
         #endif
+        */
 
-        // Update sectors_filled and sd_bytes_read incrementally
+        // Update sectors_filled and sd_samples_read incrementally
         if (blocks_complete > manager->transfer_blocks_completed)
         {
-            #if DEBUG
-            mp_printf(&mp_plat_print, "voice#%u sectors_filled=%u sd_bytes_read=%u sd_current_sector=%u\n", manager->active_voice_idx, voice->sectors_filled, voice->sd_bytes_read, voice->sd_current_sector);
-            #endif
-
             // Calculate how many NEW blocks were completed since last update
             uint32_t new_blocks = blocks_complete - manager->transfer_blocks_completed;
 
-            #if DEBUG
-            mp_printf(&mp_plat_print, "voice#%u new_blocks=%u\n", manager->active_voice_idx, new_blocks);
-            #endif
-
             voice->sectors_filled += new_blocks;
-            voice->sd_bytes_read += new_blocks * SDIO_BLOCK_SIZE;
-            voice->sd_current_sector += new_blocks;
+            voice->sd_samples_read += new_blocks * SECTOR_SAMPLES;
             manager->transfer_blocks_completed = blocks_complete;
+            /*
             #if DEBUG
-            mp_printf(&mp_plat_print, "voice#%u sectors_filled=%u sd_bytes_read=%u sd_current_sector=%u\n", manager->active_voice_idx, voice->sectors_filled, voice->sd_bytes_read, voice->sd_current_sector);
+            mp_printf(&mp_plat_print, "voice#%u sectors_filled=%u sd_samples_read=%u\n", manager->active_voice_idx, voice->sectors_filled, voice->sd_samples_read);
             #endif
+             */
         }
 
         // If transfer still in progress, return BUSY
@@ -357,30 +409,30 @@ sdio_status_t sdio_voice_manager_update(sdio_voice_manager_t *manager)
             mp_printf(&mp_plat_print, "voice#%u rx complete write_sector_idx=%u\n", manager->active_voice_idx, voice->write_sector_idx);
             #endif
 
-            // Zero-fill sectors that are past sd_size_bytes
-            if (voice->sd_bytes_read > voice->sd_size_bytes)
+            // Zero-fill sectors that are past sd_size_samples
+            if (voice->sd_samples_read > voice->sd_size_samples)
             {
                 #if DEBUG
-                mp_printf(&mp_plat_print, "DO WE ZERO?: sd_size_bytes=%u sd_bytes_read=%u\n", voice->sd_size_bytes, voice->sd_bytes_read);
+                mp_printf(&mp_plat_print, "DO WE ZERO?: sd_size_samples=%u sd_samples_read=%u\n", voice->sd_size_samples, voice->sd_samples_read);
                 #endif
 
-                uint32_t last_valid_byte = voice->sd_size_bytes % SDIO_BLOCK_SIZE;
-                uint32_t last_sector_idx = (voice->sd_size_bytes / SDIO_BLOCK_SIZE) % RING_SIZE;
+                uint32_t last_valid_sample = voice->sd_size_samples % SECTOR_SAMPLES;
+                uint32_t last_sector_idx = (voice->sd_size_samples / SECTOR_SAMPLES) % RING_SIZE;
 
                 // Zero-fill tail of the last partial sector
-                if (last_valid_byte > 0)
+                if (last_valid_sample > 0)
                 {
                     #if DEBUG
                     mp_printf(&mp_plat_print, "voice#%u zero fill partial sector %u start %u len %u\n",
                               manager->active_voice_idx, last_sector_idx,
-                              last_valid_byte, SDIO_BLOCK_SIZE - last_valid_byte);
+                              last_valid_sample, SECTOR_SAMPLES - last_valid_sample);
                     #endif
-                    memset((uint8_t*)voice->buffer + last_sector_idx * SDIO_BLOCK_SIZE + last_valid_byte,
-                           0, SDIO_BLOCK_SIZE - last_valid_byte);
+                    memset((uint8_t*)voice->buffer + last_sector_idx * SDIO_BLOCK_SIZE + samples_to_bytes(last_valid_sample),
+                           0, samples_to_bytes(SECTOR_SAMPLES - last_valid_sample));
                 }
 
                 // Zero-fill all free sectors between last_sector_idx+1 and the read pointer (wrap-around)
-                uint32_t read_sector_idx = (voice->bytes_consumed / SDIO_BLOCK_SIZE) % RING_SIZE;
+                uint32_t read_sector_idx = (voice->samples_consumed / SECTOR_SAMPLES) % RING_SIZE;
                 uint32_t zero_sector = (last_sector_idx + 1) % RING_SIZE;
                 while (zero_sector != read_sector_idx)
                 {
@@ -391,7 +443,7 @@ sdio_status_t sdio_voice_manager_update(sdio_voice_manager_t *manager)
                     memset((uint8_t*)voice->buffer + zero_sector * SDIO_BLOCK_SIZE,
                            0, SDIO_BLOCK_SIZE);
                     voice->sectors_filled++;
-                    voice->sd_bytes_read += SDIO_BLOCK_SIZE;
+                    voice->sd_samples_read += SECTOR_SAMPLES;
                     zero_sector = (zero_sector + 1) % RING_SIZE;
                 }
             }
@@ -420,8 +472,8 @@ sdio_status_t sdio_voice_manager_update(sdio_voice_manager_t *manager)
             continue; // Should never happen, skip this voice
         }
 
-        // Only consider active voices (sd_size_bytes > 0)
-        if (voice->sd_size_bytes > 0 &&
+        // Only consider active voices (sd_size_samples > 0)
+        if (voice->sd_size_samples > 0 &&
             voice->sectors_filled < min_filled)
         {
             min_filled = voice->sectors_filled;
@@ -434,11 +486,9 @@ sdio_status_t sdio_voice_manager_update(sdio_voice_manager_t *manager)
     if (least_filled_voice != NULL)
     {
 
-        #if DEBUG
-        mp_printf(&mp_plat_print, "voice#%u try start rx with %u filled\n", least_filled_idx, min_filled);
-        #endif
 
-        if (min_filled < 5) {
+
+        if (min_filled < 6) {
 
             uint32_t blocks_started = 0;
             sdio_status_t status = sdio_voice_start_transfer(least_filled_voice, &blocks_started);
@@ -461,32 +511,21 @@ sdio_status_t sdio_voice_manager_update(sdio_voice_manager_t *manager)
     return SDIO_OK;
 }
 
-uint32_t sdio_voice_available(const sdio_voice_t *voice)
+void sdio_voice_consume(sdio_voice_t *voice, uint32_t samples_read)
 {
-    if (voice == NULL)
-    {
-        return 0;
-    }
-
-    // Return bytes written by DMA minus bytes consumed by reader
-    return voice->sd_bytes_read - voice->bytes_consumed;
-}
-
-void sdio_voice_consume(sdio_voice_t *voice, uint32_t bytes_read)
-{
-    if (voice == NULL || bytes_read == 0)
+    if (voice == NULL || samples_read == 0)
     {
         return;
     }
 
     // Calculate how many complete sectors were consumed before this call
-    uint32_t sectors_before = voice->bytes_consumed / SDIO_BLOCK_SIZE;
+    uint32_t sectors_before = voice->samples_consumed / SECTOR_SAMPLES;
 
-    // Update total bytes consumed
-    voice->bytes_consumed += bytes_read;
+    // Update total samples consumed
+    voice->samples_consumed += samples_read;
 
     // Calculate how many complete sectors are consumed after this call
-    uint32_t sectors_after = voice->bytes_consumed / SDIO_BLOCK_SIZE;
+    uint32_t sectors_after = voice->samples_consumed / SECTOR_SAMPLES;
 
     // Calculate how many NEW complete sectors were freed
     uint32_t sectors_freed = sectors_after - sectors_before;
@@ -509,18 +548,17 @@ void sdio_voice_print_diag(const sdio_voice_t *voice, const char *label)
 
     mp_printf(&mp_plat_print, "=== Voice Diagnostic: %s ===\n", label ? label : "VOICE");
     mp_printf(&mp_plat_print, "  SD Card State:\n");
-    mp_printf(&mp_plat_print, "    Current sector:    %u\n", voice->sd_current_sector);
-    mp_printf(&mp_plat_print, "    Size (bytes):      %u\n", voice->sd_size_bytes);
-    mp_printf(&mp_plat_print, "    Bytes read:        %u\n", voice->sd_bytes_read);
+    mp_printf(&mp_plat_print, "    Size (samples):    %u\n", voice->sd_size_samples);
+    mp_printf(&mp_plat_print, "    Samples read:      %u\n", voice->sd_samples_read);
     mp_printf(&mp_plat_print, "  Voice Buffer State:\n");
     mp_printf(&mp_plat_print, "    Write sector idx:  %u\n", voice->write_sector_idx);
     mp_printf(&mp_plat_print, "    Sectors filled:    %u / %u\n", voice->sectors_filled, RING_SIZE);
-    mp_printf(&mp_plat_print, "    Bytes consumed:    %u\n", voice->bytes_consumed);
+    mp_printf(&mp_plat_print, "    Samples consumed:  %u\n", voice->samples_consumed);
     mp_printf(&mp_plat_print, "  Computed Values:\n");
-    mp_printf(&mp_plat_print, "    Available bytes:   %u\n", voice->sd_bytes_read - voice->bytes_consumed);
+    mp_printf(&mp_plat_print, "    Available samples: %u\n", voice->sd_samples_read - voice->samples_consumed);
     mp_printf(&mp_plat_print, "    Progress:          %u / %u (%.1f%%)\n",
-              voice->sd_bytes_read, voice->sd_size_bytes,
-              voice->sd_size_bytes > 0 ? (100.0f * voice->sd_bytes_read / voice->sd_size_bytes) : 0.0f);
+              voice->sd_samples_read, voice->sd_size_samples,
+              voice->sd_size_samples > 0 ? (100.0f * voice->sd_samples_read / voice->sd_size_samples) : 0.0f);
     mp_printf(&mp_plat_print, "    Free sectors:      %u\n", RING_SIZE - voice->sectors_filled);
     mp_printf(&mp_plat_print, "===================================\n");
 }
@@ -559,18 +597,18 @@ void sdio_voice_manager_print_diag(const sdio_voice_manager_t *manager, const ch
             continue;
         }
 
-        bool is_active = (voice->sd_size_bytes > 0);
+        bool is_active = (voice->sd_size_samples > 0);
         const char *status = (manager->active_voice_idx == (int)i) ? "TRANSFERRING" :
                             (is_active ? "ACTIVE" : "INACTIVE");
 
         mp_printf(&mp_plat_print, "    [%u] %s", i, status);
         if (is_active)
         {
-            uint32_t available = voice->sd_bytes_read - voice->bytes_consumed;
-            float progress = voice->sd_size_bytes > 0 ? (100.0f * voice->sd_bytes_read / voice->sd_size_bytes) : 0.0f;
-            mp_printf(&mp_plat_print, " - Sector:%u Size:%u Read:%u Consumed:%u Avail:%u (%.1f%%) Filled:%u/%u",
-                     voice->sd_current_sector, voice->sd_size_bytes, voice->sd_bytes_read,
-                     voice->bytes_consumed, available, progress, voice->sectors_filled, RING_SIZE);
+            uint32_t available = voice->sd_samples_read - voice->samples_consumed;
+            float progress = voice->sd_size_samples > 0 ? (100.0f * voice->sd_samples_read / voice->sd_size_samples) : 0.0f;
+            mp_printf(&mp_plat_print, " - Size:%u Read:%u Consumed:%u Avail:%u (%.1f%%) Filled:%u/%u",
+                     voice->sd_size_samples, voice->sd_samples_read,
+                     voice->samples_consumed, available, progress, voice->sectors_filled, RING_SIZE);
         }
         mp_printf(&mp_plat_print, "\n");
     }
@@ -616,6 +654,18 @@ uint32_t sdio_voice_fill_chunk(sdio_voice_manager_t *manager)
 
         if (voice->state == VOICE_RUNNING)
         {
+            if (voice->adsr != NULL)
+            {
+                // Generate ADSR envelope into amplitude_buffer (reused as q16_t scratch)
+                adsr_process_block(voice->adsr, (q16_t *)manager->amplitude_buffer,
+                                   manager->chunk_size);
+                // Convert q16_t [0..0xFFFF] → Q1_14_t [0..0x3FFF] in-place
+                for (uint32_t j = 0; j < manager->chunk_size; j++)
+                {
+                    manager->amplitude_buffer[j] =
+                        (Q1_14_t)(((uint16_t *)manager->amplitude_buffer)[j] >> 2);
+                }
+            }
             _voice_fill_bloc(voice, manager->amplitude_buffer,
                              manager->accumulator_buffer, manager->chunk_size);
             nb_active += 1;
@@ -634,27 +684,41 @@ uint32_t sdio_voice_fill_chunk(sdio_voice_manager_t *manager)
     return nb_active;
 }
 
+void sdio_voice_set_adsr(sdio_voice_t *voice, adsr_t *adsr)
+{
+    if (voice != NULL)
+    {
+        voice->adsr = adsr;
+    }
+}
+
 // Voices
 static _Bool _voice_fill_bloc(sdio_voice_t * voice, const Q1_14_t * amp, Q17_14_t * dest, uint32_t count) {
     omega_t pos = voice->omega;
+    const omega_t omega_frac = voice->omega & ((1<<OMEGA_SHIFT)-1);
+
+    // Current absolute sample position
+    const uint32_t abs_sample = voice->samples_consumed;
+
+    // nb sample needed to fill dest
+    const uint32_t nb_samples = (omega_frac + voice->omega_inc * count) >> OMEGA_SHIFT;
+    const uint32_t samples_needed = nb_samples + 1;
+
+    // how many samples avail in buffer
+    const uint32_t samples_avail = voice->sd_samples_read - voice->samples_consumed;
 
     #if DEBUG
-    mp_printf(&mp_plat_print, "Fill block: state %u sector %u, pos %u, sample %u, count %u\n", voice->state, voice->sd_current_sector, pos, pos>>OMEGA_SHIFT, count);
+    info(voice);
+    mp_printf(&mp_plat_print, "Fill block: state %u, pos %u, sample %u, abs_sample %u, nb_samples %u (needed=+1), avail %u\n", voice->state, pos, pos>>OMEGA_SHIFT, abs_sample, nb_samples, samples_avail);
     #endif
 
-    uint32_t nb_samples = (voice->omega_inc * count) >> OMEGA_SHIFT;
-    uint32_t nb_samples_needed = nb_samples + 1;
 
-    uint32_t samples_avail = bytes_to_samples(sdio_voice_available(voice));
-
-    if (nb_samples_needed > samples_avail) {
-        mp_printf(&mp_plat_print, "underrun got %u needs %u\n", samples_avail, nb_samples_needed);
+    if (samples_needed > samples_avail) {
+        mp_printf(&mp_plat_print, "underrun got %u needs %u\n", samples_avail, samples_needed);
         voice->state = VOICE_CANCEL;
         return false;
     }
 
-    // Current absolute sample position (bytes_consumed is in bytes, /2 for int16)
-    uint32_t abs_sample = bytes_to_samples(voice->bytes_consumed);
 
     const bool has_loop = (voice->loop_end_sample != 0);
 
@@ -664,18 +728,25 @@ static _Bool _voice_fill_bloc(sdio_voice_t * voice, const Q1_14_t * amp, Q17_14_
         abs_sample <= voice->loop_start_sample &&
         voice->loop_start_sample < abs_sample + nb_samples) {
 
-        uint32_t aligned_start_sample = (voice->loop_start_sample / SECTOR_SAMPLES) * SECTOR_SAMPLES;
-        // samples available from aligned_start_sample onward, rounded down to full sectors
-        uint32_t samples_from_aligned = samples_avail - (aligned_start_sample - abs_sample);
-        uint32_t cache_count = (samples_from_aligned / SECTOR_SAMPLES) * SECTOR_SAMPLES;
-        if (cache_count > LOOP_CACHE_SAMPLES) cache_count = LOOP_CACHE_SAMPLES;
+        const uint32_t start_offset = voice->loop_start_sample % SECTOR_SAMPLES;
+        uint32_t cache_count = voice->sd_samples_read - voice->loop_start_sample;
 
-        ring_read(voice->buffer, aligned_start_sample, voice->loop_cache, cache_count);
+        if (cache_count > LOOP_CACHE_SAMPLES) cache_count = LOOP_CACHE_SAMPLES-start_offset;
+
+        ring_read(voice->buffer, voice->loop_start_sample, voice->loop_cache, cache_count);
 
         voice->loop_cache_samples = cache_count;
         #if DEBUG
-        mp_printf(&mp_plat_print, "Loop cache filled: aligned_start=%u loop_start=%u count=%u\n",
-                  aligned_start_sample, voice->loop_start_sample, cache_count);
+        mp_printf(&mp_plat_print,
+            "[LOOP CACHE INIT] abs_sample=%u loop_start=%u\n"
+            "  src: voice->buffer ring offset=%u (loop_start_sample %% RING_SAMPLES)\n"
+            "  dst: voice->loop_cache[0..%u]\n"
+            "  samples_avail=%u cache_count=%u\n",
+            abs_sample, voice->loop_start_sample,
+            voice->loop_start_sample % RING_SAMPLES,
+            cache_count,
+            samples_avail, cache_count);
+        mp_event_handle_nowait();
         #endif
     }
 
@@ -689,40 +760,71 @@ static _Bool _voice_fill_bloc(sdio_voice_t * voice, const Q1_14_t * amp, Q17_14_
     // Ring reorganisation (B before A to avoid overwriting source data):
     //   Step B: move the tail [abs_sample..loop_end[ to just before loop_start % RING_SAMPLES.
     //   Step A: write loop_cache at loop_start % RING_SAMPLES.
-    // Then fix voice state so that bytes_consumed points to the virtual start of this read
-    // (loop_start - remaining), and sdio_voice_consume(nb_samples*2) will land correctly.
+    // Then fix voice state so that samples_consumed points to the virtual start of this read
+    // (loop_start - remaining), and sdio_voice_consume(nb_samples) will land correctly.
     //
     if (has_loop && voice->loop_cache_samples > 0 &&
         abs_sample <= voice->loop_end_sample &&
-        voice->loop_end_sample < abs_sample + nb_samples_needed) {
+        voice->loop_end_sample < abs_sample + samples_needed) {
 
-        uint32_t loop_start = voice->loop_start_sample;
-        uint32_t loop_end   = voice->loop_end_sample;
-        uint32_t remaining  = loop_end - abs_sample;  // samples still to play before loop_start
+        const uint32_t loop_start = voice->loop_start_sample;
+        const uint32_t loop_end   = voice->loop_end_sample;
+        const uint32_t remaining  = loop_end - abs_sample;  // samples still to play before loop_start
+
+
 
         // Step B: move the tail [abs_sample..loop_end[ to just before loop_start in the ring.
-        uint32_t tail_dst = (loop_start + RING_SAMPLES - remaining) % RING_SAMPLES;
+        uint32_t tail_dst = (loop_start - remaining);
+        #if DEBUG
+        mp_printf(&mp_plat_print,
+            "[LOOP USE] abs_sample=%u loop_end=%u loop_start=%u remaining=%u cache_samples=%u\n",
+            abs_sample, loop_end, loop_start, remaining, voice->loop_cache_samples);
+        mp_printf(&mp_plat_print,
+            "  Step B ring_copy: %u samples from %u to %u\n",remaining, abs_sample, loop_start);
+        mp_event_handle_nowait();
+        #endif
         ring_copy(voice->buffer, tail_dst, abs_sample, remaining);
 
         // Step A: inject loop_cache at loop_start % RING_SAMPLES (from external buffer, no overlap).
+        #if DEBUG
+        mp_printf(&mp_plat_print,
+            "  Step A ring_write: %u samples from buffer to %u (loop body)\n",
+            voice->loop_cache_samples, loop_start);
+        mp_event_handle_nowait();
+        #endif
         ring_write(voice->buffer, loop_start, voice->loop_cache, voice->loop_cache_samples);
 
-        // Fix up state to reflect the new start-of-read position: loop_start - remaining.
-        // sdio_voice_consume(nb_samples*2) below will then advance bytes_consumed correctly.
-        uint32_t aligned_start_sample = (loop_start / SECTOR_SAMPLES) * SECTOR_SAMPLES;
-        uint32_t cache_end_sample     = aligned_start_sample + voice->loop_cache_samples;
-        voice->bytes_consumed   = samples_to_bytes(loop_start - remaining);
-        voice->sd_bytes_read    = samples_to_bytes(aligned_start_sample + voice->loop_cache_samples);
-        voice->write_sector_idx = (cache_end_sample / SECTOR_SAMPLES) % RING_SIZE;
-        // sectors_filled: full sectors available from bytes_consumed onward
-        uint32_t avail_bytes    = voice->sd_bytes_read - (voice->bytes_consumed / SDIO_BLOCK_SIZE) * SDIO_BLOCK_SIZE;
-        voice->sectors_filled   = avail_bytes / SDIO_BLOCK_SIZE;
+
+        voice->samples_consumed = loop_start - remaining;
+
+        voice->sd_samples_read = loop_start + voice->loop_cache_samples;
+        // mp_printf(&mp_plat_print,"  Delta Read %u samples, %u sectors old current sector %u, new %u\n", delta_read, delta_read/SECTOR_SAMPLES, voice->sd_current_sector, voice->sd_current_sector - delta_read/SECTOR_SAMPLES);
+
+        voice->write_sector_idx = (voice->sd_samples_read / SECTOR_SAMPLES) % RING_SIZE;
+        // sectors_filled: full sectors available from samples_consumed onward
+        uint32_t avail_samples  = voice->sd_samples_read - (voice->samples_consumed / SECTOR_SAMPLES) * SECTOR_SAMPLES;
+        voice->sectors_filled   = avail_samples / SECTOR_SAMPLES;
         if (voice->sectors_filled > RING_SIZE) voice->sectors_filled = RING_SIZE;
 
+        int32_t delta_pos = abs_sample - tail_dst;
+        pos -= delta_pos<< OMEGA_SHIFT;
+
         #if DEBUG
-        mp_printf(&mp_plat_print, "Loop inject: loop_end=%u loop_start=%u remaining=%u cache_samples=%u\n",
-                  loop_end, loop_start, remaining, voice->loop_cache_samples);
+        mp_printf(&mp_plat_print,
+            "  State after inject:\n"
+            "    samples_consumed=%u  (new read start)\n"
+            "    sd_samples_read=%u   (new write end)\n"
+            "    write_sector_idx=%u\n"
+            "    sectors_filled=%u / %u\n"
+            "    omega/pos=%u  (sample %u)\n",
+            voice->samples_consumed,
+            voice->sd_samples_read,
+            voice->write_sector_idx,
+            voice->sectors_filled, RING_SIZE,
+            pos, pos >> OMEGA_SHIFT);
+        mp_event_handle_nowait();
         #endif
+
     }
 
     while(count--) {
@@ -732,9 +834,9 @@ static _Bool _voice_fill_bloc(sdio_voice_t * voice, const Q1_14_t * amp, Q17_14_
     }
 
     voice->omega = pos;
-    sdio_voice_consume(voice, samples_to_bytes(nb_samples));
+    sdio_voice_consume(voice, nb_samples);
 
-    bool running = voice->bytes_consumed <= voice->sd_size_bytes;
+    bool running = (voice->samples_consumed <= voice->sd_size_samples) && (! adsr_done(voice->adsr));
 
     if (!running) {
         voice->state = VOICE_DONE;

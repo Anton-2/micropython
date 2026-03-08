@@ -3,17 +3,18 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
-#include "include/sdio_rp2350.h"
+#include <include/sdio_rp2350.h>
 
+#include "sdio_adsr.h"
 
 //Number of bits to index ring buffer
 #define RING_BITS    12                              //   12   13
-#define RING_BYTES   (1<<RING_BITS)                 // 4096 8192 bytes ring buffer
-#define RING_SAMPLES (RING_BYTES/sizeof(int16_t))   // 2048 4096 samples in ring
-#define RING_SIZE    (RING_BYTES/SDIO_BLOCK_SIZE)   //    8   16 sectors in ring
-#define SECTOR_SAMPLES (SDIO_BLOCK_SIZE/2)          // samples per sector (int16)
+#define RING_BYTES   (1<<RING_BITS)                  // 4096 8192 bytes ring buffer
+#define RING_SAMPLES (RING_BYTES/sizeof(int16_t))    // 2048 4096 samples in ring
+#define RING_SIZE    (RING_BYTES/SDIO_BLOCK_SIZE)    //    8   16 sectors in ring
+#define SECTOR_SAMPLES (SDIO_BLOCK_SIZE/2)           // samples per sector (int16)
 
-#define SAMPLE_BYTES  sizeof(int16_t)               // bytes per sample
+#define SAMPLE_BYTES  sizeof(int16_t)                // bytes per sample
 #define samples_to_bytes(n)  ((n) * SAMPLE_BYTES)
 #define bytes_to_samples(n)  ((n) / SAMPLE_BYTES)
 
@@ -54,19 +55,19 @@ typedef struct Sample {
 
 
 // Number of samples in loop cache (half the ring buffer)
-#define LOOP_CACHE_SAMPLES (RING_BYTES / 4)  // RING_BYTES/2 bytes = RING_BYTES/4 int16_t samples
+#define LOOP_CACHE_SAMPLES (RING_SAMPLES)
 
-// Voice structure
+// Voice structure, every counter / size is in sample
 typedef struct {
     // SD card position
-    uint32_t sd_current_sector;     // Current sector being read from SD card
-    uint32_t sd_size_bytes;         // Total size in bytes to read from SD card, buffer is 0 filled after this
-    uint32_t sd_bytes_read;         // Number of bytes already read from SD card
+    uint32_t sd_start_sector;       // First sector being read from SD card
+    uint32_t sd_size_samples;       // Total size in samples to read from SD card, buffer is 0 filled after this
+    uint32_t sd_samples_read;       // Number of samples already read from SD card
 
     // Ring buffer position
     uint32_t write_sector_idx;      // Current sector index being written by DMA (0 to RING_SIZE-1)
     uint32_t sectors_filled;        // Number of sectors currently filled with data
-    uint32_t bytes_consumed;        // Total number of bytes consumed by reader
+    uint32_t samples_consumed;      // Total number of samples consumed by reader
 
     // Voice
     omega_t omega_inc;              // phase increment § OMEGA_BITS.FRAC_BITS
@@ -76,15 +77,19 @@ typedef struct {
     uint32_t loop_start_sample;     // Sample index of loop start (absolute, from beginning of sample data)
     uint32_t loop_end_sample;       // Sample index of loop end (first sample past the loop), 0 = no loop
 
-    // Loop cache: stores up to LOOP_CACHE_SAMPLES samples from the sector-aligned boundary
-    // before loop_start_sample. Filled once when playback first reaches loop_start_sample.
-    int16_t loop_cache[LOOP_CACHE_SAMPLES];
-    uint32_t loop_cache_samples;    // actual number of samples stored in loop_cache (0 = not yet filled)
-
     uint32_t state:3;
 
-    // Buffer data (aligned for DMA)
+    // Optional per-voice ADSR envelope (NULL = use manager amplitude_buffer)
+    adsr_t *adsr;
+
+    // Buffer data (word aligned for DMA)
     int16_t buffer[RING_BYTES/sizeof(int16_t)] __attribute__((aligned(4)));  // Continuous buffer for RING_SIZE sectors
+
+    // Loop cache: stores up to LOOP_CACHE_SAMPLES samples from the sector-aligned boundary
+    // before loop_start_sample. Filled once when playback first reaches loop_start_sample.
+    uint32_t loop_cache_samples;    // actual number of samples stored in loop_cache (0 = not yet filled)
+    int16_t loop_cache[LOOP_CACHE_SAMPLES];
+
 } sdio_voice_t;
 
 
@@ -127,16 +132,17 @@ static inline sdio_voice_t *sdio_voice_manager_get(sdio_voice_manager_t *manager
 // Start/restart a voice with new SD card configuration
 // Can be called on an already used voice to restart it
 // sd_sector: first sector to read
-// size_bytes: total size in bytes to read (sectors beyond this are filled with zeros)
+// size_samples: total size in samples to read (sectors beyond this are filled with zeros)
+// start_sample: starting sample offset
 // loop_start_sample: sample index where the loop begins (0 if no loop)
 // loop_end_sample: sample index of first sample past the loop (0 = no loop)
 // Returns SDIO_ERR_INVALID_PARAM if a transfer is in progress on this voice
 sdio_status_t sdio_voice_start(sdio_voice_manager_t *manager,
                                 uint32_t voice_index,
                                 uint32_t sd_sector,
-                                uint32_t size_bytes,
+                                uint32_t size_samples,
                                 omega_t omega_inc,
-                                uint32_t start_offset,
+                                uint32_t start_sample,
                                 uint32_t loop_start_sample,
                                 uint32_t loop_end_sample);
 
@@ -146,13 +152,13 @@ sdio_status_t sdio_voice_start(sdio_voice_manager_t *manager,
 // or error code on failure
 sdio_status_t sdio_voice_manager_update(sdio_voice_manager_t *manager);
 
-// Get number of bytes available for reading
+// Get number of samples available for reading
 // Consumer maintains its own read pointer
 uint32_t sdio_voice_available(const sdio_voice_t *voice);
 
-// Notify voice that bytes have been consumed
-// bytes_read: number of bytes consumed from buffer
-void sdio_voice_consume(sdio_voice_t *voice, uint32_t bytes_read);
+// Notify voice that samples have been consumed
+// samples_read: number of samples consumed from buffer
+void sdio_voice_consume(sdio_voice_t *voice, uint32_t samples_read);
 
 // Print diagnostic information about a voice (for debugging)
 void sdio_voice_print_diag(const sdio_voice_t *voice, const char *label);
@@ -166,3 +172,7 @@ uint32_t sdio_voice_fill_chunk(sdio_voice_manager_t *manager);
 // Fill amplitude buffer with a constant value
 // amplitude: Q1_14_t value to fill the buffer with
 void sdio_voice_fill_amplitude(sdio_voice_manager_t *manager, Q1_14_t amplitude);
+
+// Attach or detach an ADSR envelope to a voice (NULL to detach)
+// When attached, fill_chunk generates the amplitude from the ADSR instead of amplitude_buffer
+void sdio_voice_set_adsr(sdio_voice_t *voice, adsr_t *adsr);

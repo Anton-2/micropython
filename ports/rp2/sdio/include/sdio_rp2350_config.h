@@ -10,8 +10,8 @@
 extern "C" {
 #endif
 
-#include "py/runtime.h"
-#include "hardware/pio.h"
+#include <py/runtime.h>
+#include <hardware/pio.h>
 
 #define SDIO_CRITMSG(txt, arg1, arg2) mp_printf(&mp_plat_print, "CRITICAL: %s %08X %08X\n", txt, arg1, arg2);
 #define SDIO_ERRMSG(txt, arg1, arg2) mp_printf(&mp_plat_print, "ERROR: %s %08X %08X\n", txt, arg1, arg2);

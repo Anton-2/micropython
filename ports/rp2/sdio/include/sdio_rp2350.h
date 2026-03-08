@@ -30,7 +30,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "sdio_rp2350_config.h"
+#include <sdio_rp2350_config.h>
 
 #ifdef __cplusplus
 extern "C" {
