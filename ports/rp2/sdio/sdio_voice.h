@@ -8,7 +8,7 @@
 #include "sdio_adsr.h"
 
 //Number of bits to index ring buffer
-#define RING_BITS    12                              //   12   13
+#define RING_BITS    14                              //   12   13
 #define RING_BYTES   (1<<RING_BITS)                  // 4096 8192 bytes ring buffer
 #define RING_SAMPLES (RING_BYTES/sizeof(int16_t))    // 2048 4096 samples in ring
 #define RING_SIZE    (RING_BYTES/SDIO_BLOCK_SIZE)    //    8   16 sectors in ring
@@ -55,7 +55,7 @@ typedef struct Sample {
 
 
 // Number of samples in loop cache (half the ring buffer)
-#define LOOP_CACHE_SAMPLES (RING_SAMPLES)
+#define LOOP_CACHE_SAMPLES (RING_SAMPLES/2)
 
 // Voice structure, every counter / size is in sample
 typedef struct {

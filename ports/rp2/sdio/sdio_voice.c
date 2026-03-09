@@ -647,31 +647,29 @@ uint32_t sdio_voice_fill_chunk(sdio_voice_manager_t *manager)
     {
         sdio_voice_t *voice = &manager->voices[i];
 
-        if (voice->state == VOICE_INIT && voice->sectors_filled == RING_SIZE)
+        if (voice->state == VOICE_INIT && voice->sectors_filled >= RING_SIZE/2)
         {
             voice->state = VOICE_RUNNING;
         }
 
-        if (voice->state == VOICE_RUNNING)
+        if ((voice->state == VOICE_RUNNING) && (voice->adsr != NULL))
         {
-            if (voice->adsr != NULL)
+            // Generate ADSR envelope into amplitude_buffer (reused as q16_t scratch)
+            adsr_process_block(voice->adsr, (q16_t *)manager->amplitude_buffer,
+                                manager->chunk_size);
+            // Convert q16_t [0..0xFFFF] → Q1_14_t [0..0x3FFF] in-place
+            for (uint32_t j = 0; j < manager->chunk_size; j++)
             {
-                // Generate ADSR envelope into amplitude_buffer (reused as q16_t scratch)
-                adsr_process_block(voice->adsr, (q16_t *)manager->amplitude_buffer,
-                                   manager->chunk_size);
-                // Convert q16_t [0..0xFFFF] → Q1_14_t [0..0x3FFF] in-place
-                for (uint32_t j = 0; j < manager->chunk_size; j++)
-                {
-                    manager->amplitude_buffer[j] =
-                        (Q1_14_t)(((uint16_t *)manager->amplitude_buffer)[j] >> 2);
-                }
+                manager->amplitude_buffer[j] =
+                    (Q1_14_t)(((uint16_t *)manager->amplitude_buffer)[j] >> 4);
             }
+
             _voice_fill_bloc(voice, manager->amplitude_buffer,
                              manager->accumulator_buffer, manager->chunk_size);
             nb_active += 1;
         }
 
-        if (voice->state == VOICE_CANCEL && manager->active_voice_idx != (int)i)
+        if (((voice->state == VOICE_CANCEL) || (voice->state == VOICE_DONE)) && manager->active_voice_idx != (int)i)
         {
             voice->state = VOICE_FREE;
         }
